@@ -252,7 +252,8 @@ async function loadOutlookServices() {
                             <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();toggleEmailMoreMenu(this)">更多</button>
                             <div class="dropdown-menu" style="min-width:80px;">
                                 <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);toggleService(${service.id}, ${!service.enabled})">${service.enabled ? '禁用' : '启用'}</a>
-                                <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);testService(${service.id})">测试</a>
+                                <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);testOutlookService(${service.id})">测试</a>
+                                <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);fetchOutlookInboxCode(${service.id})">收件箱</a>
                             </div>
                         </div>
                         <button class="btn btn-danger btn-sm" onclick="deleteService(${service.id}, '${escapeHtml(service.name)}')">删除</button>
@@ -518,6 +519,57 @@ async function testService(id) {
         else toast.error('测试失败: ' + (result.error || '未知错误'));
     } catch (error) {
         toast.error('测试失败: ' + error.message);
+    }
+}
+
+// Outlook 专用: 测试收码能力（成功时后端会记录验证码日志）
+async function testOutlookService(id) {
+    try {
+        const result = await api.post(`/email-services/${id}/outlook/test-code`);
+        if (result.success) {
+            const codeText = result.code ? `，验证码: ${result.code}` : '';
+            toast.success(`测试成功${codeText}`);
+        } else {
+            toast.error(result.message || '测试失败');
+        }
+    } catch (error) {
+        toast.error('测试失败: ' + error.message);
+    }
+}
+
+// Outlook 专用: 查询一分钟内最新验证码并复制到剪贴板
+async function fetchOutlookInboxCode(id) {
+    try {
+        const result = await api.post(`/email-services/${id}/outlook/inbox-code`);
+        if (!result.success || !result.code) {
+            toast.warning(result.message || '无最新验证码生成');
+            return;
+        }
+
+        await copyTextToClipboard(result.code);
+        toast.success(`验证码已复制: ${result.code}`);
+    } catch (error) {
+        toast.error('收件箱查询失败: ' + error.message);
+    }
+}
+
+async function copyTextToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    if (!ok) {
+        throw new Error('复制失败，请手动复制验证码');
     }
 }
 

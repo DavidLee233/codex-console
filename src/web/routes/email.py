@@ -3,6 +3,7 @@
 """
 
 import logging
+import time
 from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -63,6 +64,15 @@ class ServiceTestResult(BaseModel):
     success: bool
     message: str
     details: Optional[Dict[str, Any]] = None
+
+
+class OutlookCodeResult(BaseModel):
+    """Outlook 验证码读取结果"""
+    success: bool
+    message: str
+    code: Optional[str] = None
+    email: Optional[str] = None
+    waited_seconds: Optional[int] = None
 
 
 class OutlookBatchImportRequest(BaseModel):
@@ -412,6 +422,133 @@ async def test_email_service(service_id: int):
                 success=False,
                 message=f"测试失败: {str(e)}"
             )
+
+
+def _build_outlook_service_for_code_check(db, service_id: int):
+    service = db.query(EmailServiceModel).filter(EmailServiceModel.id == service_id).first()
+    if not service:
+        raise HTTPException(status_code=404, detail="服务不存在")
+    if service.service_type != "outlook":
+        raise HTTPException(status_code=400, detail="该接口仅支持 Outlook 服务")
+    if not service.enabled:
+        raise HTTPException(status_code=400, detail="该 Outlook 服务已禁用")
+
+    config = dict(service.config or {})
+    email_addr = (config.get("email") or service.name or "").strip()
+    if not email_addr:
+        raise HTTPException(status_code=400, detail="Outlook 服务缺少邮箱地址配置")
+    config["email"] = email_addr
+
+    email_service = EmailServiceFactory.create(EmailServiceType.OUTLOOK, config, name=service.name)
+    return service, email_service, email_addr
+
+
+@router.post("/{service_id}/outlook/test-code", response_model=OutlookCodeResult)
+async def test_outlook_verification_code(service_id: int):
+    """
+    测试 Outlook 验证码收取能力（轮询 IMAP_OLD/IMAP_NEW/GRAPH_API + INBOX/JUNK）。
+    成功时在后端日志打印 6 位验证码。
+    """
+    with get_db() as db:
+        service, email_service, email_addr = _build_outlook_service_for_code_check(db, service_id)
+        timeout_seconds = 75
+        trigger_code = None
+        trigger_fn = getattr(email_service, "trigger_test_verification_email", None)
+        if callable(trigger_fn):
+            trigger_code = trigger_fn(email_addr)
+        if not trigger_code:
+            logger.warning(
+                f"[Outlook Test] trigger failed service_id={service.id}, email={email_addr}"
+            )
+            return OutlookCodeResult(
+                success=False,
+                message="自动触发验证码失败（IMAP 追加测试邮件失败）",
+                email=email_addr,
+                waited_seconds=0,
+            )
+        otp_sent_at = time.time()
+        logger.info(
+            f"[Outlook Test] start service_id={service.id}, email={email_addr}, "
+            f"timeout={timeout_seconds}s, trigger_code={trigger_code}"
+        )
+        start_at = time.time()
+        code = email_service.get_verification_code(
+            email=email_addr,
+            timeout=timeout_seconds,
+            otp_sent_at=otp_sent_at,
+            pattern=r"(?<!\d)(\d{6})(?!\d)",
+            allow_any_sender=True,
+            lookback_seconds=120,
+            prefer_unseen_rounds=0,
+            fetch_count=120,
+            strict_unseen_only=True,
+        )
+        waited = int(time.time() - start_at)
+        if code:
+            logger.info(f"[Outlook Test] service_id={service.id}, email={email_addr}, code={code}")
+            return OutlookCodeResult(
+                success=True,
+                message="测试成功，已获取验证码",
+                code=code,
+                email=email_addr,
+                waited_seconds=waited,
+            )
+        logger.warning(
+            f"[Outlook Test] no code found service_id={service.id}, email={email_addr}, waited={waited}s"
+        )
+        return OutlookCodeResult(
+            success=False,
+            message="测试完成，但未获取到验证码",
+            email=email_addr,
+            waited_seconds=waited,
+        )
+
+
+@router.post("/{service_id}/outlook/inbox-code", response_model=OutlookCodeResult)
+async def get_outlook_latest_inbox_code(service_id: int):
+    """
+    查询一分钟内最新验证码。
+    成功时返回验证码（前端复制到剪贴板），失败时返回“无最新验证码生成”。
+    """
+    with get_db() as db:
+        service, email_service, email_addr = _build_outlook_service_for_code_check(db, service_id)
+        timeout_seconds = 60
+        otp_sent_at = time.time()
+        logger.info(
+            f"[Outlook Inbox] start service_id={service.id}, email={email_addr}, "
+            f"timeout={timeout_seconds}s, lookback=60s"
+        )
+        start_at = time.time()
+        code = email_service.get_verification_code(
+            email=email_addr,
+            timeout=timeout_seconds,
+            otp_sent_at=otp_sent_at,
+            pattern=r"(?<!\d)(\d{6})(?!\d)",
+            allow_any_sender=True,
+            lookback_seconds=60,
+            prefer_unseen_rounds=0,
+            fetch_count=80,
+            strict_unseen_only=True,
+        )
+        waited = int(time.time() - start_at)
+        if code:
+            logger.info(f"[Outlook Inbox] service_id={service.id}, email={email_addr}, code={code}")
+            return OutlookCodeResult(
+                success=True,
+                message="已获取最新验证码",
+                code=code,
+                email=email_addr,
+                waited_seconds=waited,
+            )
+        logger.warning(
+            f"[Outlook Inbox] no code found service_id={service.id}, email={email_addr}, waited={waited}s"
+        )
+        return OutlookCodeResult(
+            success=False,
+            message="无最新验证码生成",
+            email=email_addr,
+            waited_seconds=waited,
+        )
 
 
 @router.post("/{service_id}/enable")

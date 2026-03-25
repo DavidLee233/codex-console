@@ -28,7 +28,7 @@ class GraphAPIProvider(OutlookProvider):
 
     # Graph API 端点
     GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
-    MESSAGES_ENDPOINT = "/me/mailFolders/inbox/messages"
+    MESSAGES_ENDPOINT_TEMPLATE = "/me/mailFolders/{folder}/messages"
 
     @property
     def provider_type(self) -> ProviderType:
@@ -90,6 +90,7 @@ class GraphAPIProvider(OutlookProvider):
         self,
         count: int = 20,
         only_unseen: bool = True,
+        mailbox: str = "INBOX",
     ) -> List[EmailMessage]:
         """
         获取最近的邮件
@@ -112,8 +113,9 @@ class GraphAPIProvider(OutlookProvider):
                 self.record_failure("无法获取 Access Token")
                 return []
 
-            # 构建 API 请求
-            url = f"{self.GRAPH_API_BASE}{self.MESSAGES_ENDPOINT}"
+            # Build API request by mailbox.
+            folder = self._resolve_graph_folder(mailbox)
+            url = f"{self.GRAPH_API_BASE}{self.MESSAGES_ENDPOINT_TEMPLATE.format(folder=folder)}"
 
             params = {
                 "$top": count,
@@ -126,9 +128,7 @@ class GraphAPIProvider(OutlookProvider):
                 params["$filter"] = "isRead eq false"
 
             # 构建代理配置
-            proxies = None
-            if self.config.proxy_url:
-                proxies = {"http": self.config.proxy_url, "https": self.config.proxy_url}
+            proxies = self._build_proxies()
 
             # 发送请求（curl_cffi 自动对 params 进行 URL 编码）
             resp = _requests.get(
@@ -180,6 +180,81 @@ class GraphAPIProvider(OutlookProvider):
             self.record_failure(str(e))
             logger.error(f"[{self.account.email}] Graph API 获取邮件失败: {e}")
             return []
+
+    def inject_test_code_email(self, code: str, mailbox: str = "INBOX") -> bool:
+        """
+        Create a local test email in target folder via Graph API.
+        This keeps parity with IMAP providers for the test button.
+        """
+        if not self._connected:
+            if not self.connect():
+                return False
+        if not self._token_manager:
+            return False
+
+        token = self._token_manager.get_access_token()
+        if not token:
+            return False
+
+        folder = self._resolve_graph_folder(mailbox or "INBOX")
+        url = f"{self.GRAPH_API_BASE}{self.MESSAGES_ENDPOINT_TEMPLATE.format(folder=folder)}"
+        payload = {
+            "subject": f"[Outlook Test] Verification code is {code}",
+            "body": {
+                "contentType": "Text",
+                "content": (
+                    "Automated mailbox test email.\n"
+                    f"Your verification code is {code}\n"
+                    "If you did not initiate this test, ignore this message.\n"
+                ),
+            },
+            "toRecipients": [
+                {"emailAddress": {"address": self.account.email}},
+            ],
+            "isRead": False,
+        }
+
+        try:
+            resp = _requests.post(
+                url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                proxies=self._build_proxies(),
+                timeout=self.config.timeout,
+                impersonate="chrome110",
+            )
+            if resp.status_code in (200, 201):
+                logger.info(
+                    f"[{self.account.email}] GRAPH_API 创建测试邮件成功, folder={folder}, code={code}"
+                )
+                return True
+            logger.warning(
+                f"[{self.account.email}] GRAPH_API 创建测试邮件失败, "
+                f"status={resp.status_code}, body={resp.text[:200]}"
+            )
+            return False
+        except Exception as e:
+            logger.warning(f"[{self.account.email}] GRAPH_API 创建测试邮件异常: {e}")
+            return False
+
+    @staticmethod
+    def _resolve_graph_folder(mailbox: str) -> str:
+        """Map IMAP-like mailbox names to Graph folder ids."""
+        target = (mailbox or "INBOX").upper()
+        if target == "INBOX":
+            return "inbox"
+        if target in {"JUNK", "SPAM", "JUNKEMAIL"}:
+            return "junkemail"
+        return mailbox.lower() if mailbox else "inbox"
+
+    def _build_proxies(self):
+        if not self.config.proxy_url:
+            return None
+        return {"http": self.config.proxy_url, "https": self.config.proxy_url}
 
     def _parse_graph_message(self, msg: dict) -> Optional[EmailMessage]:
         """

@@ -6,8 +6,10 @@
 import email
 import imaplib
 import logging
+import time
+from email.message import EmailMessage as PyEmailMessage
 from email.header import decode_header
-from email.utils import parsedate_to_datetime
+from email.utils import parsedate_to_datetime, formatdate
 from typing import List, Optional
 
 from ..base import ProviderType, EmailMessage
@@ -28,6 +30,10 @@ class IMAPOldProvider(OutlookProvider):
     # IMAP 服务器配置
     IMAP_HOST = "outlook.office365.com"
     IMAP_PORT = 993
+    MAILBOX_CANDIDATES = {
+        "INBOX": ["INBOX"],
+        "JUNK": ["Junk", "Junk E-mail", "Spam", "垃圾邮件", "JunkEmail"],
+    }
 
     @property
     def provider_type(self) -> ProviderType:
@@ -147,6 +153,7 @@ class IMAPOldProvider(OutlookProvider):
         self,
         count: int = 20,
         only_unseen: bool = True,
+        mailbox: str = "INBOX",
     ) -> List[EmailMessage]:
         """
         获取最近的邮件
@@ -163,8 +170,10 @@ class IMAPOldProvider(OutlookProvider):
                 return []
 
         try:
-            # 选择收件箱
-            self._conn.select("INBOX", readonly=True)
+            # Select mailbox with aliases for junk/spam folders.
+            if not self._select_mailbox(mailbox, readonly=True):
+                logger.debug(f"[{self.account.email}] 无法选择邮箱文件夹: {mailbox}")
+                return []
 
             # 搜索邮件
             flag = "UNSEEN" if only_unseen else "ALL"
@@ -192,6 +201,82 @@ class IMAPOldProvider(OutlookProvider):
             self.record_failure(str(e))
             logger.error(f"[{self.account.email}] 获取邮件失败: {e}")
             return []
+
+    def _select_mailbox(self, mailbox: str, readonly: bool = True) -> bool:
+        """Select a mailbox, supporting aliases for junk folder names."""
+        if not self._conn:
+            return False
+
+        target = (mailbox or "INBOX").upper()
+        candidates = self.MAILBOX_CANDIDATES.get(target, [mailbox or "INBOX"])
+        for candidate in candidates:
+            status, _ = self._conn.select(candidate, readonly=readonly)
+            if status == "OK":
+                return True
+            if " " in candidate:
+                status, _ = self._conn.select(f"\"{candidate}\"", readonly=readonly)
+                if status == "OK":
+                    return True
+        return False
+
+    def inject_test_code_email(self, code: str, mailbox: str = "INBOX") -> bool:
+        """
+        Append a local test OTP email to mailbox via IMAP APPEND.
+        This allows end-to-end receive testing without external sender.
+        """
+        if not self._connected:
+            if not self.connect():
+                return False
+        if not self._conn:
+            return False
+
+        msg = PyEmailMessage()
+        msg["From"] = self.account.email
+        msg["To"] = self.account.email
+        msg["Subject"] = f"[Outlook Test] Verification code is {code}"
+        msg["Date"] = formatdate(localtime=True)
+        msg.set_content(
+            "Automated mailbox test email.\n"
+            f"Your verification code is {code}\n"
+            "If you did not initiate this test, ignore this message.\n"
+        )
+
+        try:
+            status, _ = self._conn.append(
+                mailbox or "INBOX",
+                "()",
+                imaplib.Time2Internaldate(time.time()),
+                msg.as_bytes(),
+            )
+            ok = status == "OK"
+            if ok:
+                self._ensure_test_mail_unseen(code=code, mailbox=mailbox or "INBOX")
+            if ok:
+                logger.info(f"[{self.account.email}] IMAP APPEND 测试邮件成功, code={code}")
+            else:
+                logger.warning(f"[{self.account.email}] IMAP APPEND 测试邮件失败, status={status}")
+            return ok
+        except Exception as e:
+            logger.warning(f"[{self.account.email}] IMAP APPEND 测试邮件异常: {e}")
+            return False
+
+    def _ensure_test_mail_unseen(self, code: str, mailbox: str = "INBOX"):
+        """Best-effort: remove \\Seen flag from injected test message."""
+        if not self._conn:
+            return
+        try:
+            if not self._select_mailbox(mailbox, readonly=False):
+                return
+            status, data = self._conn.search(None, "SUBJECT", f"\"{code}\"")
+            if status != "OK" or not data or not data[0]:
+                return
+            for msg_id in data[0].split():
+                try:
+                    self._conn.store(msg_id, "-FLAGS", r"(\Seen)")
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug(f"[{self.account.email}] 去除测试邮件 \\Seen 标记失败: {e}")
 
     def _fetch_email(self, msg_id: bytes) -> Optional[EmailMessage]:
         """

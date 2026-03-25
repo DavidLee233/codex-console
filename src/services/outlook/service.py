@@ -22,6 +22,7 @@ from .providers.graph_api import GraphAPIProvider
 
 
 logger = logging.getLogger(__name__)
+MAILBOX_POLL_SEQUENCE = ("INBOX", "JUNK")
 
 
 # 默认提供者优先级
@@ -193,18 +194,16 @@ class OutlookService(BaseEmailService):
             raise ValueError(f"未知的提供者类型: {provider_type}")
 
     def _get_provider_priority_for_account(self, account: OutlookAccount) -> List[ProviderType]:
-        """根据账户是否有 OAuth，返回适合的提供者优先级列表"""
-        if account.has_oauth():
-            return self.provider_priority
-        else:
-            # 无 OAuth，直接走旧版 IMAP（密码认证），跳过需要 OAuth 的提供者
-            return [ProviderType.IMAP_OLD]
+        """Return provider priority list for one polling round."""
+        return list(self.provider_priority)
 
     def _try_providers_for_emails(
         self,
         account: OutlookAccount,
         count: int = 20,
         only_unseen: bool = True,
+        mailboxes: Optional[List[str]] = None,
+        deadline_ts: Optional[float] = None,
     ) -> List[EmailMessage]:
         """
         尝试多个提供者获取邮件
@@ -218,12 +217,22 @@ class OutlookService(BaseEmailService):
             邮件列表
         """
         errors = []
+        all_emails: List[EmailMessage] = []
+        seen_ids = set()
 
         # 根据账户类型选择合适的提供者优先级
         priority = self._get_provider_priority_for_account(account)
+        mailbox_order = mailboxes or list(MAILBOX_POLL_SEQUENCE)
 
-        # 按优先级尝试各提供者
+        # In each polling round, iterate all providers and all target mailboxes.
         for provider_type in priority:
+            if deadline_ts and time.time() >= deadline_ts:
+                break
+
+            if provider_type in (ProviderType.IMAP_NEW, ProviderType.GRAPH_API) and not account.has_oauth():
+                logger.debug(f"[{account.email}] 跳过 {provider_type.value}（无 OAuth 配置）")
+                continue
+
             # 检查提供者是否可用
             if not self.health_checker.is_available(provider_type):
                 logger.debug(
@@ -236,15 +245,45 @@ class OutlookService(BaseEmailService):
 
                 with self._imap_semaphore:
                     with provider:
-                        emails = provider.get_recent_emails(count, only_unseen)
-
-                        if emails:
-                            # 成功获取邮件
-                            self.health_checker.record_success(provider_type)
-                            logger.debug(
-                                f"[{account.email}] {provider_type.value} 获取到 {len(emails)} 封邮件"
+                        got_any = False
+                        for mailbox in mailbox_order:
+                            if deadline_ts and time.time() >= deadline_ts:
+                                break
+                            if deadline_ts:
+                                remaining = deadline_ts - time.time()
+                                provider_cfg = getattr(provider, "config", None)
+                                provider_timeout = getattr(provider_cfg, "timeout", None)
+                                if provider_timeout is None:
+                                    provider_timeout = 30
+                                if remaining < provider_timeout:
+                                    logger.debug(
+                                        f"[{account.email}] 跳过 {provider_type.value}:{mailbox}，"
+                                        f"剩余超时预算 {remaining:.1f}s < provider 超时 {provider_timeout}s"
+                                    )
+                                    break
+                            emails = provider.get_recent_emails(
+                                count=count,
+                                only_unseen=only_unseen,
+                                mailbox=mailbox,
                             )
-                            return emails
+                            if not emails:
+                                continue
+
+                            got_any = True
+                            logger.debug(
+                                f"[{account.email}] {provider_type.value}:{mailbox} 获取到 {len(emails)} 封邮件"
+                            )
+                            for item in emails:
+                                msg_id = item.id or ""
+                                dedup_key = f"{provider_type.value}:{mailbox}:{msg_id}:{item.received_timestamp}"
+                                if dedup_key in seen_ids:
+                                    continue
+                                seen_ids.add(dedup_key)
+                                all_emails.append(item)
+
+                        # One successful provider pass resets its health failures.
+                        if got_any:
+                            self.health_checker.record_success(provider_type)
 
             except Exception as e:
                 error_msg = str(e)
@@ -254,10 +293,66 @@ class OutlookService(BaseEmailService):
                     f"[{account.email}] {provider_type.value} 获取邮件失败: {e}"
                 )
 
-        logger.error(
-            f"[{account.email}] 所有提供者都失败: {'; '.join(errors)}"
-        )
-        return []
+        if errors and not all_emails:
+            logger.error(
+                f"[{account.email}] 所有提供者都失败: {'; '.join(errors)}"
+            )
+        return all_emails
+
+    def trigger_test_verification_email(
+        self,
+        email: str,
+        code: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Inject a test OTP mail into target mailbox.
+        Returns injected code when successful.
+        """
+        account = None
+        for acc in self.accounts:
+            if acc.email.lower() == email.lower():
+                account = acc
+                break
+        if not account:
+            logger.warning(f"[{email}] 自动触发测试验证码失败: 未找到对应账户")
+            return None
+
+        import secrets
+        test_code = code or f"{secrets.randbelow(10**6):06d}"
+        priority = self._get_provider_priority_for_account(account)
+
+        for provider_type in priority:
+            if provider_type in (ProviderType.IMAP_NEW, ProviderType.GRAPH_API) and not account.has_oauth():
+                continue
+
+            try:
+                provider = self._get_provider(account, provider_type)
+                injector = getattr(provider, "inject_test_code_email", None)
+                if not callable(injector):
+                    continue
+
+                if provider_type in (ProviderType.IMAP_OLD, ProviderType.IMAP_NEW):
+                    with self._imap_semaphore:
+                        with provider:
+                            if injector(test_code, mailbox="INBOX"):
+                                logger.info(
+                                    f"[{email}] 自动触发测试验证码成功: provider={provider_type.value}, code={test_code}"
+                                )
+                                return test_code
+                else:
+                    with provider:
+                        if injector(test_code, mailbox="INBOX"):
+                            logger.info(
+                                f"[{email}] 自动触发测试验证码成功: provider={provider_type.value}, code={test_code}"
+                            )
+                            return test_code
+            except Exception as e:
+                logger.warning(
+                    f"[{email}] 自动触发测试验证码失败: provider={provider_type.value}, error={e}"
+                )
+
+        logger.warning(f"[{email}] 自动触发测试验证码失败: 所有可用收件通道均失败")
+        return None
 
     def create_email(self, config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -298,6 +393,11 @@ class OutlookService(BaseEmailService):
         timeout: int = None,
         pattern: str = None,
         otp_sent_at: Optional[float] = None,
+        allow_any_sender: bool = False,
+        lookback_seconds: int = 60,
+        prefer_unseen_rounds: int = 3,
+        fetch_count: int = 15,
+        strict_unseen_only: bool = False,
     ) -> Optional[str]:
         """
         从 Outlook 邮箱获取验证码
@@ -339,53 +439,74 @@ class OutlookService(BaseEmailService):
         used_codes = self._used_codes[email]
 
         # 计算最小时间戳（留出 60 秒时钟偏差）
-        min_timestamp = (otp_sent_at - 60) if otp_sent_at else 0
+        safe_lookback = max(0, int(lookback_seconds))
+        min_timestamp = int(otp_sent_at - safe_lookback) if otp_sent_at else 0
+        logger.info(
+            f"[{email}] 验证码筛选窗口: min_timestamp={min_timestamp}, "
+            f"allow_any_sender={allow_any_sender}, pattern={'default' if not pattern else pattern}"
+        )
 
         start_time = time.time()
+        deadline_ts = start_time + actual_timeout
         poll_count = 0
 
-        while time.time() - start_time < actual_timeout:
+        while time.time() < deadline_ts:
             poll_count += 1
 
-            # 渐进式邮件检查：前 3 次只检查未读
-            only_unseen = poll_count <= 3
+            # 未读策略:
+            # - strict_unseen_only=True: 全程仅检索未读
+            # - 否则按 prefer_unseen_rounds 渐进切换
+            only_unseen = True if strict_unseen_only else (poll_count <= max(0, int(prefer_unseen_rounds)))
 
             try:
                 # 尝试多个提供者获取邮件
                 emails = self._try_providers_for_emails(
                     account,
-                    count=15,
+                    count=max(1, int(fetch_count)),
                     only_unseen=only_unseen,
+                    mailboxes=list(MAILBOX_POLL_SEQUENCE),
+                    deadline_ts=deadline_ts,
                 )
 
                 if emails:
-                    logger.debug(
-                        f"[{email}] 第 {poll_count} 次轮询获取到 {len(emails)} 封邮件"
+                    logger.info(
+                        f"[{email}] 第 {poll_count} 轮获取到 {len(emails)} 封候选邮件 "
+                        f"(only_unseen={only_unseen}, fetch_count={fetch_count})"
+                    )
+                else:
+                    logger.info(
+                        f"[{email}] 第 {poll_count} 轮未获取到候选邮件 "
+                        f"(only_unseen={only_unseen}, fetch_count={fetch_count})"
                     )
 
-                    # 从邮件中查找验证码
-                    code = self.email_parser.find_verification_code_in_emails(
-                        emails,
-                        target_email=email,
-                        min_timestamp=min_timestamp,
-                        used_codes=used_codes,
-                    )
+                # 从邮件中查找验证码
+                code = self.email_parser.find_verification_code_in_emails(
+                    emails,
+                    target_email=email,
+                    min_timestamp=min_timestamp,
+                    used_codes=used_codes,
+                    pattern=pattern,
+                    allow_any_sender=allow_any_sender,
+                )
 
-                    if code:
-                        used_codes.add(code)
-                        elapsed = int(time.time() - start_time)
-                        logger.info(
-                            f"[{email}] 找到验证码: {code}，"
-                            f"总耗时 {elapsed}s，轮询 {poll_count} 次"
-                        )
-                        self.update_status(True)
-                        return code
+                if code:
+                    used_codes.add(code)
+                    elapsed = int(time.time() - start_time)
+                    logger.info(
+                        f"[{email}] 找到验证码: {code}，"
+                        f"总耗时 {elapsed}s，轮询 {poll_count} 次"
+                    )
+                    self.update_status(True)
+                    return code
 
             except Exception as e:
                 logger.warning(f"[{email}] 检查出错: {e}")
 
-            # 等待下次轮询
-            time.sleep(poll_interval)
+            # 等待下次轮询（不超过总超时截止）
+            remaining = deadline_ts - time.time()
+            if remaining <= 0:
+                break
+            time.sleep(min(poll_interval, remaining))
 
         elapsed = int(time.time() - start_time)
         logger.warning(f"[{email}] 验证码超时 ({actual_timeout}s)，共轮询 {poll_count} 次")
