@@ -906,7 +906,7 @@ async function exportAccounts(format) {
 
         const blob = await response.blob();
         const disposition = response.headers.get('Content-Disposition');
-        let filename = `accounts_${Date.now()}.${(format === 'cpa' || format === 'sub2api') ? 'json' : format}`;
+        let filename = `accounts_${Date.now()}.${(format === 'cpa' || format === 'sub2api') ? 'json' : (format === 'codex' ? 'jsonl' : format)}`;
         if (disposition) {
             const match = disposition.match(/filename=(.+)/);
             if (match) {
