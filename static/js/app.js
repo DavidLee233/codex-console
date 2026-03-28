@@ -1182,7 +1182,7 @@ async function loadOutlookAccounts() {
 
         renderOutlookAccountsList();
 
-        addLog('info', `[系统] 已加载 ${data.total} 个 Outlook 账户 (已注册: ${data.registered_count}, 未注册: ${data.unregistered_count})`);
+        addLog('info', `[系统] 已加载 ${data.unregistered_count} 个可注册 Outlook 账户 (已隐藏: ${data.registered_count})`);
 
     } catch (error) {
         console.error('加载 Outlook 账户列表失败:', error);
@@ -1199,15 +1199,12 @@ function renderOutlookAccountsList() {
     }
 
     const html = outlookAccounts.map(account => `
-        <label class="outlook-account-item" style="display: flex; align-items: center; padding: var(--spacing-sm); border-bottom: 1px solid var(--border-light); cursor: pointer; ${account.is_registered ? 'opacity: 0.6;' : ''}" data-id="${account.id}" data-registered="${account.is_registered}">
-            <input type="checkbox" class="outlook-account-checkbox" value="${account.id}" ${account.is_registered ? '' : 'checked'} style="margin-right: var(--spacing-sm);">
+        <label class="outlook-account-item" style="display: flex; align-items: center; padding: var(--spacing-sm); border-bottom: 1px solid var(--border-light); cursor: pointer;" data-id="${account.id}" data-registered="false">
+            <input type="checkbox" class="outlook-account-checkbox" value="${account.id}" checked style="margin-right: var(--spacing-sm);">
             <div style="flex: 1;">
                 <div style="font-weight: 500;">${escapeHtml(account.email)}</div>
                 <div style="font-size: 0.75rem; color: var(--text-muted);">
-                    ${account.is_registered
-                        ? `<span style="color: var(--success-color);">✓ 已注册</span>`
-                        : '<span style="color: var(--primary-color);">未注册</span>'
-                    }
+                    <span style="color: var(--primary-color);">可注册</span>
                     ${account.has_oauth ? ' | OAuth' : ''}
                 </div>
             </div>
@@ -1225,12 +1222,7 @@ function selectAllOutlookAccounts() {
 
 // 只选未注册
 function selectUnregisteredOutlook() {
-    const items = document.querySelectorAll('.outlook-account-item');
-    items.forEach(item => {
-        const checkbox = item.querySelector('.outlook-account-checkbox');
-        const isRegistered = item.dataset.registered === 'true';
-        checkbox.checked = !isRegistered;
-    });
+    selectAllOutlookAccounts();
 }
 
 // 取消全选
@@ -1250,7 +1242,10 @@ async function handleOutlookBatchRegistration() {
     // 获取选中的账户
     const selectedIds = [];
     document.querySelectorAll('.outlook-account-checkbox:checked').forEach(cb => {
-        selectedIds.push(parseInt(cb.value));
+        const parsedId = parseInt(cb.value, 10);
+        if (!Number.isNaN(parsedId)) {
+            selectedIds.push(parsedId);
+        }
     });
 
     if (selectedIds.length === 0) {

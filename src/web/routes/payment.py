@@ -3254,7 +3254,7 @@ def batch_check_subscription(request: BatchCheckSubscriptionRequest):
                 if status in ("plus", "team"):
                     account.subscription_type = status
                     account.subscription_at = datetime.utcnow()
-                elif status == "free" and confidence == "high":
+                elif status == "free":
                     account.subscription_type = None
                     account.subscription_at = None
 

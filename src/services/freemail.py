@@ -8,7 +8,11 @@ import time
 import logging
 import random
 import string
+import json
 from typing import Optional, Dict, Any, List
+from types import SimpleNamespace
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from .base import BaseEmailService, EmailServiceError, EmailServiceType
 from ..core.http_client import HTTPClient, RequestConfig
@@ -31,6 +35,8 @@ class FreemailService(BaseEmailService):
             config: 配置字典，支持以下键:
                 - base_url: Worker 域名地址 (必需)
                 - admin_token: Admin Token，对应 JWT_TOKEN (必需)
+                - cf_access_client_id: Cloudflare Access Service Token Client ID (可选)
+                - cf_access_client_secret: Cloudflare Access Service Token Client Secret (可选)
                 - domain: 邮箱域名，如 example.com
                 - timeout: 请求超时时间，默认 30
                 - max_retries: 最大重试次数，默认 3
@@ -61,11 +67,88 @@ class FreemailService(BaseEmailService):
 
     def _get_headers(self) -> Dict[str, str]:
         """构造 admin 请求头"""
-        return {
+        headers = {
             "Authorization": f"Bearer {self.config['admin_token']}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        cf_access_client_id = str(self.config.get("cf_access_client_id") or "").strip()
+        cf_access_client_secret = str(self.config.get("cf_access_client_secret") or "").strip()
+        if cf_access_client_id and cf_access_client_secret:
+            headers["CF-Access-Client-Id"] = cf_access_client_id
+            headers["CF-Access-Client-Secret"] = cf_access_client_secret
+        return headers
+
+    def _request_via_stdlib(self, method: str, url: str, **kwargs):
+        """在 curl_cffi TLS 失败时回退到标准库 urllib。"""
+        headers = dict(kwargs.get("headers") or {})
+        headers.setdefault(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        )
+        headers.setdefault("Accept-Encoding", "identity")
+
+        params = kwargs.get("params")
+        if params:
+            query = urlencode(params)
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}{query}"
+
+        body = kwargs.get("data")
+        json_body = kwargs.get("json")
+        if json_body is not None:
+            body = json.dumps(json_body).encode("utf-8")
+        elif isinstance(body, str):
+            body = body.encode("utf-8")
+
+        request = Request(
+            url=url,
+            data=body,
+            headers=headers,
+            method=method.upper(),
+        )
+        with urlopen(request, timeout=kwargs.get("timeout", self.config["timeout"])) as response:
+            payload = response.read()
+            text = payload.decode("utf-8", errors="replace")
+            headers = dict(response.headers.items())
+            return SimpleNamespace(
+                status_code=response.getcode(),
+                text=text,
+                headers=headers,
+                json=lambda: json.loads(text),
+            )
+
+    def _parse_response(self, response) -> Any:
+        """统一解析 Freemail API 响应。"""
+        if response.status_code >= 400:
+            error_msg = f"请求失败: {response.status_code}"
+            try:
+                error_data = response.json()
+                error_msg = f"{error_msg} - {error_data}"
+            except Exception:
+                error_msg = f"{error_msg} - {response.text[:200]}"
+            self.update_status(False, EmailServiceError(error_msg))
+            raise EmailServiceError(error_msg)
+
+        try:
+            return response.json()
+        except Exception:
+            raw_text = response.text or ""
+            lowered = raw_text.lower()
+            content_type = str(response.headers.get("Content-Type", "")).lower()
+            if (
+                "cloudflare access" in lowered
+                or "sign in ・ cloudflare access" in raw_text
+                or "<title>sign in" in lowered and "cloudflare access" in lowered
+                or "text/html" in content_type and "<html" in lowered
+            ):
+                raise EmailServiceError(
+                    "Freemail API 被 Cloudflare Access 保护，当前返回的是 Access 登录页而不是 JSON。"
+                    "请在 Cloudflare Zero Trust 中为该 Worker 域名关闭 Access，"
+                    "或至少对 /api/* 放行 / 创建 Bypass 规则后再重试。"
+                )
+            return {"raw_response": raw_text}
 
     def _make_request(self, method: str, path: str, **kwargs) -> Any:
         """
@@ -87,22 +170,18 @@ class FreemailService(BaseEmailService):
         kwargs["headers"].update(self._get_headers())
 
         try:
-            response = self.http_client.request(method, url, **kwargs)
-
-            if response.status_code >= 400:
-                error_msg = f"请求失败: {response.status_code}"
-                try:
-                    error_data = response.json()
-                    error_msg = f"{error_msg} - {error_data}"
-                except Exception:
-                    error_msg = f"{error_msg} - {response.text[:200]}"
-                self.update_status(False, EmailServiceError(error_msg))
-                raise EmailServiceError(error_msg)
-
             try:
-                return response.json()
-            except Exception:
-                return {"raw_response": response.text}
+                response = self.http_client.request(method, url, **kwargs)
+            except Exception as primary_error:
+                logger.warning(
+                    "Freemail curl_cffi request failed for %s %s, fallback to urllib: %s",
+                    method,
+                    path,
+                    primary_error,
+                )
+                response = self._request_via_stdlib(method, url, **kwargs)
+
+            return self._parse_response(response)
 
         except Exception as e:
             self.update_status(False, e)

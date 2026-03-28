@@ -7,6 +7,8 @@ import logging
 import re
 import zipfile
 import base64
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -29,6 +31,7 @@ from ...core.dynamic_proxy import get_proxy_url_for_task
 from ...database import crud
 from ...database.models import Account
 from ...database.session import get_db
+from ...services.outlook.service import build_outlook_code_poll_kwargs
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -43,6 +46,8 @@ INVALID_ACCOUNT_STATUSES = (
     AccountStatus.EXPIRED.value,
     AccountStatus.BANNED.value,
 )
+ACCOUNT_TOKEN_MAINTENANCE_INTERVAL_SECONDS = 3600
+RELAY_IMPORT_MAX_WORKERS = 5
 
 
 def _get_proxy(request_proxy: Optional[str] = None) -> Optional[str]:
@@ -232,6 +237,77 @@ def resolve_account_ids(
             (Account.email.ilike(pattern)) | (Account.account_id.ilike(pattern))
         )
     return [row[0] for row in query.all()]
+
+
+def _refresh_account_tokens_by_ids(ids: List[int], proxy: Optional[str]) -> Dict[str, Any]:
+    results = {
+        "success_count": 0,
+        "failed_count": 0,
+        "errors": [],
+    }
+    for account_id in ids:
+        try:
+            result = do_refresh(account_id, proxy)
+            if result.success:
+                results["success_count"] += 1
+            else:
+                results["failed_count"] += 1
+                results["errors"].append({"id": account_id, "error": result.error_message})
+        except Exception as exc:
+            results["failed_count"] += 1
+            results["errors"].append({"id": account_id, "error": str(exc)})
+    return results
+
+
+def _validate_account_tokens_by_ids(ids: List[int], proxy: Optional[str]) -> Dict[str, Any]:
+    results = {
+        "valid_count": 0,
+        "invalid_count": 0,
+        "details": [],
+    }
+    for account_id in ids:
+        try:
+            is_valid, error = do_validate(account_id, proxy)
+            results["details"].append({
+                "id": account_id,
+                "valid": is_valid,
+                "error": error,
+            })
+            if is_valid:
+                results["valid_count"] += 1
+            else:
+                results["invalid_count"] += 1
+        except Exception as exc:
+            try:
+                with get_db() as db:
+                    account = crud.get_account_by_id(db, account_id)
+                    if account and account.status != AccountStatus.FAILED.value:
+                        crud.update_account(db, account_id, status=AccountStatus.FAILED.value)
+            except Exception:
+                pass
+            results["invalid_count"] += 1
+            results["details"].append({
+                "id": account_id,
+                "valid": False,
+                "error": str(exc),
+            })
+    return results
+
+
+def run_scheduled_account_token_maintenance(proxy: Optional[str] = None) -> Dict[str, Any]:
+    """Refresh and validate all accounts for the periodic maintenance job."""
+    runtime_proxy = _get_proxy(proxy)
+    with get_db() as db:
+        ids = [row[0] for row in db.query(Account.id).order_by(Account.id.asc()).all()]
+
+    refresh_results = _refresh_account_tokens_by_ids(ids, runtime_proxy)
+    validate_results = _validate_account_tokens_by_ids(ids, runtime_proxy)
+    return {
+        "account_count": len(ids),
+        "proxy": runtime_proxy,
+        "refresh": refresh_results,
+        "validate": validate_results,
+    }
 
 
 def account_to_response(account: Account) -> AccountResponse:
@@ -1815,14 +1891,8 @@ class BatchValidateRequest(BaseModel):
 
 @router.post("/batch-refresh")
 async def batch_refresh_tokens(request: BatchRefreshRequest, background_tasks: BackgroundTasks):
-    """批量刷新账号 Token"""
+    """Batch refresh account tokens."""
     proxy = _get_proxy(request.proxy)
-
-    results = {
-        "success_count": 0,
-        "failed_count": 0,
-        "errors": []
-    }
 
     with get_db() as db:
         ids = resolve_account_ids(
@@ -1830,31 +1900,19 @@ async def batch_refresh_tokens(request: BatchRefreshRequest, background_tasks: B
             request.status_filter, request.email_service_filter, request.search_filter
         )
 
-    for account_id in ids:
-        try:
-            result = do_refresh(account_id, proxy)
-            if result.success:
-                results["success_count"] += 1
-            else:
-                results["failed_count"] += 1
-                results["errors"].append({"id": account_id, "error": result.error_message})
-        except Exception as e:
-            results["failed_count"] += 1
-            results["errors"].append({"id": account_id, "error": str(e)})
-
-    return results
+    return _refresh_account_tokens_by_ids(ids, proxy)
 
 
 @router.post("/{account_id}/refresh")
 async def refresh_account_token(account_id: int, request: Optional[TokenRefreshRequest] = Body(default=None)):
-    """刷新单个账号的 Token"""
+    """Refresh a single account token."""
     proxy = _get_proxy(request.proxy if request else None)
     result = do_refresh(account_id, proxy)
 
     if result.success:
         return {
             "success": True,
-            "message": "Token 刷新成功",
+            "message": "Token refresh succeeded",
             "expires_at": result.expires_at.isoformat() if result.expires_at else None
         }
     else:
@@ -1866,14 +1924,8 @@ async def refresh_account_token(account_id: int, request: Optional[TokenRefreshR
 
 @router.post("/batch-validate")
 async def batch_validate_tokens(request: BatchValidateRequest):
-    """批量验证账号 Token 有效性"""
+    """Batch validate account tokens."""
     proxy = _get_proxy(request.proxy)
-
-    results = {
-        "valid_count": 0,
-        "invalid_count": 0,
-        "details": []
-    }
 
     with get_db() as db:
         ids = resolve_account_ids(
@@ -1881,40 +1933,12 @@ async def batch_validate_tokens(request: BatchValidateRequest):
             request.status_filter, request.email_service_filter, request.search_filter
         )
 
-    for account_id in ids:
-        try:
-            is_valid, error = do_validate(account_id, proxy)
-            results["details"].append({
-                "id": account_id,
-                "valid": is_valid,
-                "error": error
-            })
-            if is_valid:
-                results["valid_count"] += 1
-            else:
-                results["invalid_count"] += 1
-        except Exception as e:
-            # 异常账号兜底打标 failed，保证前端“失败”筛选可见。
-            try:
-                with get_db() as db:
-                    account = crud.get_account_by_id(db, account_id)
-                    if account and account.status != AccountStatus.FAILED.value:
-                        crud.update_account(db, account_id, status=AccountStatus.FAILED.value)
-            except Exception:
-                pass
-            results["invalid_count"] += 1
-            results["details"].append({
-                "id": account_id,
-                "valid": False,
-                "error": str(e)
-            })
-
-    return results
+    return _validate_account_tokens_by_ids(ids, proxy)
 
 
 @router.post("/{account_id}/validate")
 async def validate_account_token(account_id: int, request: Optional[TokenValidateRequest] = Body(default=None)):
-    """验证单个账号的 Token 有效性"""
+    """Validate a single account token."""
     proxy = _get_proxy(request.proxy if request else None)
     is_valid, error = do_validate(account_id, proxy)
 
@@ -1924,8 +1948,6 @@ async def validate_account_token(account_id: int, request: Optional[TokenValidat
         "error": error
     }
 
-
-# ============== CPA 上传相关 ==============
 
 class CPAUploadRequest(BaseModel):
     """CPA 上传请求"""
@@ -2034,6 +2056,185 @@ class BatchSub2ApiUploadRequest(BaseModel):
     priority: int = 50
 
 
+class BatchRelayImportRequest(BaseModel):
+    """批量一键导入中转站请求"""
+    ids: List[int] = []
+    select_all: bool = False
+    status_filter: Optional[str] = None
+    email_service_filter: Optional[str] = None
+    search_filter: Optional[str] = None
+    proxy: Optional[str] = None
+    concurrency: int = 3
+    priority: int = 50
+
+
+def _overview_refresh_succeeded(overview: Optional[dict]) -> bool:
+    if not isinstance(overview, dict):
+        return False
+    hourly_status = str((overview.get("hourly_quota") or {}).get("status") or "").strip().lower()
+    weekly_status = str((overview.get("weekly_quota") or {}).get("status") or "").strip().lower()
+    return not (hourly_status == "unknown" and weekly_status == "unknown")
+
+
+def _resolve_relay_import_targets(db) -> Dict[str, Optional[Dict[str, Any]]]:
+    settings = get_settings()
+
+    cpa_target: Optional[Dict[str, Any]] = None
+    cpa_services = crud.get_cpa_services(db, enabled=True)
+    if cpa_services:
+        svc = cpa_services[0]
+        cpa_target = {
+            "type": "cpa",
+            "name": svc.name,
+            "api_url": svc.api_url,
+            "api_token": svc.api_token,
+            "source": "service",
+        }
+    else:
+        cpa_token = settings.cpa_api_token.get_secret_value() if settings.cpa_api_token else ""
+        if settings.cpa_enabled and settings.cpa_api_url and cpa_token:
+            cpa_target = {
+                "type": "cpa",
+                "name": "全局 CPA 配置",
+                "api_url": settings.cpa_api_url,
+                "api_token": cpa_token,
+                "source": "global",
+            }
+
+    sub2api_target: Optional[Dict[str, Any]] = None
+    sub2api_services = crud.get_sub2api_services(db, enabled=True)
+    if sub2api_services:
+        svc = sub2api_services[0]
+        sub2api_target = {
+            "type": "sub2api",
+            "name": svc.name,
+            "api_url": svc.api_url,
+            "api_key": svc.api_key,
+            "source": "service",
+        }
+
+    return {
+        "cpa": cpa_target,
+        "sub2api": sub2api_target,
+    }
+
+
+def _run_relay_import_for_account(
+    account_id: int,
+    runtime_proxy: Optional[str],
+    relay_targets: Dict[str, Optional[Dict[str, Any]]],
+    sub2api_concurrency: int,
+    sub2api_priority: int,
+) -> Dict[str, Any]:
+    detail: Dict[str, Any] = {
+        "id": account_id,
+        "email": None,
+        "success": False,
+        "partial": False,
+        "error": None,
+        "quota_check": {"success": False, "error": None},
+        "services": {
+            "cpa": {"enabled": bool(relay_targets.get("cpa")), "success": False, "message": None},
+            "sub2api": {"enabled": bool(relay_targets.get("sub2api")), "success": False, "message": None},
+        },
+    }
+
+    with get_db() as db:
+        account = crud.get_account_by_id(db, account_id)
+        if not account:
+            detail["error"] = "账号不存在"
+            return detail
+
+        detail["email"] = account.email
+
+        if not account.access_token:
+            detail["error"] = "账号缺少 access_token"
+            detail["quota_check"]["error"] = detail["error"]
+            return detail
+
+        account_proxy = (account.proxy_used or "").strip() or runtime_proxy
+        overview, updated = _get_account_overview_data(
+            db,
+            account,
+            force_refresh=True,
+            proxy=account_proxy,
+            allow_network=True,
+        )
+        if updated:
+            db.commit()
+
+        if not _overview_refresh_succeeded(overview):
+            detail["error"] = overview.get("error") or "未通过配额刷新校验"
+            detail["quota_check"]["error"] = detail["error"]
+            return detail
+
+        detail["quota_check"] = {
+            "success": True,
+            "plan_type": overview.get("plan_type"),
+            "hourly_status": (overview.get("hourly_quota") or {}).get("status"),
+            "weekly_status": (overview.get("weekly_quota") or {}).get("status"),
+        }
+
+        enabled_targets = 0
+        success_targets = 0
+
+        cpa_target = relay_targets.get("cpa")
+        if cpa_target:
+            enabled_targets += 1
+            cpa_success, cpa_message = upload_to_cpa(
+                generate_token_json(account),
+                api_url=cpa_target["api_url"],
+                api_token=cpa_target["api_token"],
+            )
+            detail["services"]["cpa"] = {
+                "enabled": True,
+                "success": cpa_success,
+                "message": cpa_message,
+                "target_name": cpa_target["name"],
+            }
+            if cpa_success:
+                success_targets += 1
+                account.cpa_uploaded = True
+                account.cpa_uploaded_at = datetime.utcnow()
+                db.commit()
+
+        sub2api_target = relay_targets.get("sub2api")
+        if sub2api_target:
+            enabled_targets += 1
+            sub2api_success, sub2api_message = upload_to_sub2api(
+                [account],
+                sub2api_target["api_url"],
+                sub2api_target["api_key"],
+                concurrency=sub2api_concurrency,
+                priority=sub2api_priority,
+            )
+            detail["services"]["sub2api"] = {
+                "enabled": True,
+                "success": sub2api_success,
+                "message": sub2api_message,
+                "target_name": sub2api_target["name"],
+            }
+            if sub2api_success:
+                success_targets += 1
+
+        if enabled_targets == 0:
+            detail["error"] = "未启用可用的中转站服务"
+        elif success_targets == enabled_targets:
+            detail["success"] = True
+        elif success_targets > 0:
+            detail["partial"] = True
+            detail["error"] = "部分服务导入成功"
+        else:
+            failed_messages = [
+                svc["message"]
+                for svc in detail["services"].values()
+                if svc.get("enabled") and svc.get("message")
+            ]
+            detail["error"] = "；".join(failed_messages[:2]) or "导入失败"
+
+    return detail
+
+
 @router.post("/batch-upload-sub2api")
 async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
     """批量上传账号到 Sub2API"""
@@ -2069,6 +2270,86 @@ async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
         concurrency=request.concurrency,
         priority=request.priority,
     )
+    return results
+
+
+@router.post("/batch-import-relay")
+async def batch_import_accounts_to_relays(request: BatchRelayImportRequest):
+    """批量一键导入中转站（CPA + Sub2API）"""
+    runtime_proxy = _get_proxy(request.proxy)
+
+    with get_db() as db:
+        ids = resolve_account_ids(
+            db,
+            request.ids,
+            request.select_all,
+            request.status_filter,
+            request.email_service_filter,
+            request.search_filter,
+        )
+        relay_targets = _resolve_relay_import_targets(db)
+
+    if not ids:
+        raise HTTPException(status_code=400, detail="未选择可导入的账号")
+
+    if not relay_targets.get("cpa") and not relay_targets.get("sub2api"):
+        raise HTTPException(status_code=400, detail="CPA 服务和 Sub2API 服务均未启用")
+
+    results: Dict[str, Any] = {
+        "account_count": len(ids),
+        "success_count": 0,
+        "failed_count": 0,
+        "partial_count": 0,
+        "targets": {
+            "cpa": bool(relay_targets.get("cpa")),
+            "sub2api": bool(relay_targets.get("sub2api")),
+        },
+        "details": [],
+    }
+
+    max_workers = max(1, min(RELAY_IMPORT_MAX_WORKERS, len(ids)))
+    future_to_account_id = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for account_id in ids:
+            future = executor.submit(
+                _run_relay_import_for_account,
+                account_id,
+                runtime_proxy,
+                relay_targets,
+                request.concurrency,
+                request.priority,
+            )
+            future_to_account_id[future] = account_id
+
+        completed_details: Dict[int, Dict[str, Any]] = {}
+        for future in as_completed(future_to_account_id):
+            account_id = future_to_account_id[future]
+            try:
+                detail = future.result()
+            except Exception as exc:
+                detail = {
+                    "id": account_id,
+                    "email": None,
+                    "success": False,
+                    "partial": False,
+                    "error": str(exc),
+                    "quota_check": {"success": False, "error": str(exc)},
+                    "services": {
+                        "cpa": {"enabled": bool(relay_targets.get("cpa")), "success": False, "message": None},
+                        "sub2api": {"enabled": bool(relay_targets.get("sub2api")), "success": False, "message": None},
+                    },
+                }
+
+            completed_details[account_id] = detail
+            if detail.get("success"):
+                results["success_count"] += 1
+            elif detail.get("partial"):
+                results["partial_count"] += 1
+            else:
+                results["failed_count"] += 1
+
+    results["details"] = [completed_details[account_id] for account_id in ids if account_id in completed_details]
     return results
 
 
@@ -2273,15 +2554,34 @@ async def get_account_inbox_code(account_id: int):
 
         try:
             svc = EmailServiceFactory.create(service_type, config)
-            code = svc.get_verification_code(
-                account.email,
-                email_id=account.email_service_id,
-                timeout=12
-            )
+            if service_type == EmailServiceType.OUTLOOK:
+                code = svc.get_verification_code(
+                    account.email,
+                    email_id=account.email_service_id,
+                    otp_sent_at=time.time(),
+                    **build_outlook_code_poll_kwargs(
+                        timeout=60,
+                        lookback_seconds=60,
+                        fetch_count=80,
+                    ),
+                )
+            else:
+                code = svc.get_verification_code(
+                    account.email,
+                    email_id=account.email_service_id,
+                    timeout=12
+                )
         except Exception as e:
             return {"success": False, "error": str(e)}
 
         if not code:
+            if service_type == EmailServiceType.OUTLOOK:
+                return {
+                    "success": False,
+                    "error": "无最新验证码生成",
+                    "message": "无最新验证码生成",
+                    "email": account.email,
+                }
             return {"success": False, "error": "未收到验证码邮件"}
 
         return {"success": True, "code": code, "email": account.email}

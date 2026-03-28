@@ -13,6 +13,7 @@ from ...database import crud
 from ...database.session import get_db
 from ...database.models import EmailService as EmailServiceModel
 from ...services import EmailServiceFactory, EmailServiceType
+from ...services.outlook.service import build_outlook_code_poll_kwargs
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -101,6 +102,7 @@ SENSITIVE_FIELDS = {
     'access_token',
     'admin_token',
     'admin_password',
+    'cf_access_client_secret',
     'custom_auth',
 }
 
@@ -251,6 +253,8 @@ async def get_service_types():
                 "config_fields": [
                     {"name": "base_url", "label": "API 地址", "required": True, "placeholder": "https://freemail.example.com"},
                     {"name": "admin_token", "label": "Admin Token", "required": True, "secret": True},
+                    {"name": "cf_access_client_id", "label": "CF Access Client ID", "required": False, "placeholder": "可选，启用 Cloudflare Access Service Token 时填写"},
+                    {"name": "cf_access_client_secret", "label": "CF Access Client Secret", "required": False, "secret": True, "placeholder": "可选，启用 Cloudflare Access Service Token 时填写"},
                     {"name": "domain", "label": "邮箱域名", "required": False, "placeholder": "example.com"},
                 ]
             },
@@ -483,14 +487,12 @@ async def test_outlook_verification_code(service_id: int):
         start_at = time.time()
         code = email_service.get_verification_code(
             email=email_addr,
-            timeout=timeout_seconds,
             otp_sent_at=otp_sent_at,
-            pattern=r"(?<!\d)(\d{6})(?!\d)",
-            allow_any_sender=True,
-            lookback_seconds=120,
-            prefer_unseen_rounds=0,
-            fetch_count=120,
-            strict_unseen_only=True,
+            **build_outlook_code_poll_kwargs(
+                timeout=timeout_seconds,
+                lookback_seconds=120,
+                fetch_count=120,
+            ),
         )
         waited = int(time.time() - start_at)
         if code:
@@ -530,14 +532,12 @@ async def get_outlook_latest_inbox_code(service_id: int):
         start_at = time.time()
         code = email_service.get_verification_code(
             email=email_addr,
-            timeout=timeout_seconds,
             otp_sent_at=otp_sent_at,
-            pattern=r"(?<!\d)(\d{6})(?!\d)",
-            allow_any_sender=True,
-            lookback_seconds=60,
-            prefer_unseen_rounds=0,
-            fetch_count=80,
-            strict_unseen_only=True,
+            **build_outlook_code_poll_kwargs(
+                timeout=timeout_seconds,
+                lookback_seconds=60,
+                fetch_count=80,
+            ),
         )
         waited = int(time.time() - start_at)
         if code:

@@ -19,6 +19,10 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..config.settings import get_settings
 from ..config.project_notice import PROJECT_NOTICE
+from .routes.accounts import (
+    ACCOUNT_TOKEN_MAINTENANCE_INTERVAL_SECONDS,
+    run_scheduled_account_token_maintenance,
+)
 from .routes import api_router
 from .routes.websocket import router as ws_router
 from .task_manager import task_manager
@@ -223,25 +227,23 @@ def create_app() -> FastAPI:
 
     @app.get("/logs", response_class=HTMLResponse)
     async def logs_page(request: Request):
-        """后台日志页面"""
+        """Logs page."""
         if not _is_authenticated(request):
             return _redirect_to_login(request)
         return _render_template(request, "logs.html")
 
     @app.on_event("startup")
     async def startup_event():
-        """应用启动事件"""
+        """Application startup event."""
         import asyncio
         from ..database.init_db import initialize_database
         from ..core.db_logs import cleanup_database_logs
 
-        # 确保数据库已初始化（reload 模式下子进程也需要初始化）
         try:
             initialize_database()
         except Exception as e:
-            logger.warning(f"数据库初始化: {e}")
+            logger.warning(f"Database initialization failed: {e}")
 
-        # 设置 TaskManager 的事件循环
         loop = asyncio.get_event_loop()
         task_manager.set_loop(loop)
 
@@ -249,42 +251,74 @@ def create_app() -> FastAPI:
             try:
                 result = await asyncio.to_thread(cleanup_database_logs)
                 logger.info(
-                    "后台日志清理完成: 删除 %s 条，剩余 %s 条",
+                    "Database log cleanup completed: deleted %s rows, remaining %s rows",
                     result.get("deleted_total", 0),
                     result.get("remaining", 0),
                 )
             except Exception as exc:
-                logger.warning(f"后台日志清理失败: {exc}")
+                logger.warning(f"Database log cleanup failed: {exc}")
 
         async def periodic_log_cleanup():
             while True:
                 try:
-                    await asyncio.sleep(3600)  # 每小时清理一次
+                    await asyncio.sleep(3600)
                     await run_log_cleanup_once()
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
-                    logger.warning(f"后台日志定时清理异常: {exc}")
+                    logger.warning(f"Periodic database log cleanup failed: {exc}")
 
-        # 启动时先执行一次，再开启定时任务
+        async def run_account_token_maintenance_once():
+            try:
+                result = await asyncio.to_thread(run_scheduled_account_token_maintenance)
+                logger.info(
+                    "Account token maintenance completed: accounts=%s refresh_ok=%s refresh_failed=%s validate_ok=%s validate_failed=%s",
+                    result.get("account_count", 0),
+                    result.get("refresh", {}).get("success_count", 0),
+                    result.get("refresh", {}).get("failed_count", 0),
+                    result.get("validate", {}).get("valid_count", 0),
+                    result.get("validate", {}).get("invalid_count", 0),
+                )
+            except Exception as exc:
+                logger.warning(f"Account token maintenance failed: {exc}")
+
+        async def periodic_account_token_maintenance():
+            while True:
+                try:
+                    await asyncio.sleep(ACCOUNT_TOKEN_MAINTENANCE_INTERVAL_SECONDS)
+                    await run_account_token_maintenance_once()
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    logger.warning(f"Periodic account token maintenance failed: {exc}")
+
         await run_log_cleanup_once()
         app.state.log_cleanup_task = asyncio.create_task(periodic_log_cleanup())
+        app.state.account_token_initial_task = asyncio.create_task(run_account_token_maintenance_once())
+        app.state.account_token_maintenance_task = asyncio.create_task(periodic_account_token_maintenance())
 
         logger.info("=" * 50)
-        logger.info(f"{settings.app_name} v{settings.app_version} 启动中，程序正在伸懒腰...")
-        logger.info(f"调试模式: {settings.debug}")
-        logger.info(f"数据库连接已接好线: {settings.database_url}")
+        logger.info(f"{settings.app_name} v{settings.app_version} starting up")
+        logger.info(f"Debug mode: {settings.debug}")
+        logger.info(f"Database URL: {settings.database_url}")
         logger.info("=" * 50)
 
     @app.on_event("shutdown")
     async def shutdown_event():
-        """应用关闭事件"""
+        """Application shutdown event."""
         cleanup_task = getattr(app.state, "log_cleanup_task", None)
         if cleanup_task:
             cleanup_task.cancel()
-        logger.info("应用关闭，今天先收摊啦")
+        account_token_initial_task = getattr(app.state, "account_token_initial_task", None)
+        if account_token_initial_task:
+            account_token_initial_task.cancel()
+        account_token_task = getattr(app.state, "account_token_maintenance_task", None)
+        if account_token_task:
+            account_token_task.cancel()
+        logger.info("Application shutdown complete")
 
     return app
+
 
 
 # 创建全局应用实例

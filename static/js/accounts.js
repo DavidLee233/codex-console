@@ -1,18 +1,20 @@
 /**
- * 账号管理页面 JavaScript
- * 使用 utils.js 中的工具库
+ * 璐﹀彿绠＄悊椤甸潰 JavaScript
+ * 浣跨敤 utils.js 涓殑宸ュ叿搴?
  */
 
-// 状态
+// 鐘舵€?
 let currentPage = 1;
 let pageSize = 20;
 let totalAccounts = 0;
 let selectedAccounts = new Set();
 let isLoading = false;
-let selectAllPages = false;  // 是否选中了全部页
-let currentFilters = { status: '', email_service: '', search: '' };  // 当前筛选条件
+let selectAllPages = false;  // 鏄惁閫変腑浜嗗叏閮ㄩ〉
+let currentFilters = { status: '', email_service: '', search: '' };  // 褰撳墠绛涢€夋潯浠?
+const ACCOUNTS_AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
+let accountsAutoRefreshTimer = null;
 
-// DOM 元素
+// DOM 鍏冪礌
 const elements = {
     table: document.getElementById('accounts-table'),
     totalAccounts: document.getElementById('total-accounts'),
@@ -22,6 +24,7 @@ const elements = {
     filterStatus: document.getElementById('filter-status'),
     filterService: document.getElementById('filter-service'),
     searchInput: document.getElementById('search-input'),
+    batchRelayImportBtn: document.getElementById('batch-relay-import-btn'),
     refreshBtn: document.getElementById('refresh-btn'),
     batchRefreshBtn: document.getElementById('batch-refresh-btn'),
     batchValidateBtn: document.getElementById('batch-validate-btn'),
@@ -39,18 +42,18 @@ const elements = {
     closeModal: document.getElementById('close-modal')
 };
 
-// 初始化
+// 鍒濆鍖?
 document.addEventListener('DOMContentLoaded', () => {
-    loadStats();
-    loadAccounts();
+    refreshAccountsView();
     initEventListeners();
-    updateBatchButtons();  // 初始化按钮状态
+    startAccountsAutoRefresh();
+    updateBatchButtons();
     renderSelectAllBanner();
 });
 
-// 事件监听
+// 浜嬩欢鐩戝惉
 function initEventListeners() {
-    // 筛选
+    // 绛涢€?
     elements.filterStatus.addEventListener('change', () => {
         currentPage = 1;
         resetSelectAllPages();
@@ -63,14 +66,14 @@ function initEventListeners() {
         loadAccounts();
     });
 
-    // 搜索（防抖）
+    // 鎼滅储锛堥槻鎶栵級
     elements.searchInput.addEventListener('input', debounce(() => {
         currentPage = 1;
         resetSelectAllPages();
         loadAccounts();
     }, 300));
 
-    // 快捷键聚焦搜索
+    // 蹇嵎閿仛鐒︽悳绱?
     elements.searchInput.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
             elements.searchInput.blur();
@@ -80,23 +83,31 @@ function initEventListeners() {
         }
     });
 
-    // 刷新
+    // 鍒锋柊
     elements.refreshBtn.addEventListener('click', () => {
-        loadStats();
-        loadAccounts();
-        toast.info('已刷新');
+        refreshAccountsView();
+        toast.info('\u5df2\u5237\u65b0');
     });
 
-    // 批量刷新Token
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+            refreshAccountsView();
+        }
+    });
+
+    // 一键导入中转站
+    elements.batchRelayImportBtn.addEventListener('click', handleBatchRelayImport);
+
+    // 鎵归噺鍒锋柊Token
     elements.batchRefreshBtn.addEventListener('click', handleBatchRefresh);
 
-    // 批量验证Token
+    // 鎵归噺楠岃瘉Token
     elements.batchValidateBtn.addEventListener('click', handleBatchValidate);
 
-    // 批量检测订阅
+    // 鎵归噺妫€娴嬭闃?
     elements.batchCheckSubBtn.addEventListener('click', handleBatchCheckSubscription);
 
-    // 上传下拉菜单
+    // 涓婁紶涓嬫媺鑿滃崟
     const uploadMenu = document.getElementById('upload-menu');
     elements.batchUploadBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -106,10 +117,10 @@ function initEventListeners() {
     document.getElementById('batch-upload-sub2api-item').addEventListener('click', (e) => { e.preventDefault(); uploadMenu.classList.remove('active'); handleBatchUploadSub2Api(); });
     document.getElementById('batch-upload-tm-item').addEventListener('click', (e) => { e.preventDefault(); uploadMenu.classList.remove('active'); handleBatchUploadTm(); });
 
-    // 批量删除
+    // 鎵归噺鍒犻櫎
     elements.batchDeleteBtn.addEventListener('click', handleBatchDelete);
 
-    // 全选（当前页）
+    // 鍏ㄩ€夛紙褰撳墠椤碉級
     elements.selectAll.addEventListener('change', (e) => {
         const checkboxes = elements.table.querySelectorAll('input[type="checkbox"][data-id]');
         checkboxes.forEach(cb => {
@@ -128,7 +139,7 @@ function initEventListeners() {
         renderSelectAllBanner();
     });
 
-    // 分页
+    // 鍒嗛〉
     elements.prevPage.addEventListener('click', () => {
         if (currentPage > 1 && !isLoading) {
             currentPage--;
@@ -144,7 +155,7 @@ function initEventListeners() {
         }
     });
 
-    // 导出
+    // 瀵煎嚭
     elements.exportBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         elements.exportMenu.classList.toggle('active');
@@ -157,7 +168,7 @@ function initEventListeners() {
         elements.exportMenu.classList.remove('active');
     });
 
-    // 关闭模态框
+    // 鍏抽棴妯℃€佹
     elements.closeModal.addEventListener('click', () => {
         elements.detailModal.classList.remove('active');
     });
@@ -168,7 +179,7 @@ function initEventListeners() {
         }
     });
 
-    // 点击其他地方关闭下拉菜单
+    // 鐐瑰嚮鍏朵粬鍦版柟鍏抽棴涓嬫媺鑿滃崟
     document.addEventListener('click', () => {
         elements.exportMenu.classList.remove('active');
         uploadMenu.classList.remove('active');
@@ -176,7 +187,7 @@ function initEventListeners() {
     });
 }
 
-// 加载统计信息
+// 鍔犺浇缁熻淇℃伅
 async function loadStats() {
     try {
         const data = await api.get('/accounts/stats/summary');
@@ -186,14 +197,29 @@ async function loadStats() {
         elements.expiredAccounts.textContent = format.number(data.by_status?.expired || 0);
         elements.failedAccounts.textContent = format.number(data.by_status?.failed || 0);
 
-        // 添加动画效果
+        // 娣诲姞鍔ㄧ敾鏁堟灉
         animateValue(elements.totalAccounts, data.total || 0);
     } catch (error) {
-        console.error('加载统计信息失败:', error);
+        console.error('鍔犺浇缁熻淇℃伅澶辫触:', error);
     }
 }
 
-// 数字动画
+function refreshAccountsView() {
+    loadStats();
+    loadAccounts();
+}
+
+function startAccountsAutoRefresh() {
+    if (accountsAutoRefreshTimer) {
+        window.clearInterval(accountsAutoRefreshTimer);
+    }
+    accountsAutoRefreshTimer = window.setInterval(() => {
+        if (document.hidden) return;
+        refreshAccountsView();
+    }, ACCOUNTS_AUTO_REFRESH_INTERVAL_MS);
+}
+
+// 鏁板瓧鍔ㄧ敾
 function animateValue(element, value) {
     element.style.transition = 'transform 0.2s ease';
     element.style.transform = 'scale(1.1)';
@@ -202,12 +228,11 @@ function animateValue(element, value) {
     }, 200);
 }
 
-// 加载账号列表
+// 鍔犺浇璐﹀彿鍒楄〃
 async function loadAccounts() {
     if (isLoading) return;
     isLoading = true;
 
-    // 显示加载状态
     elements.table.innerHTML = `
         <tr>
             <td colspan="9">
@@ -220,7 +245,6 @@ async function loadAccounts() {
         </tr>
     `;
 
-    // 记录当前筛选条件
     currentFilters.status = elements.filterStatus.value;
     currentFilters.email_service = elements.filterService.value;
     currentFilters.search = elements.searchInput.value.trim();
@@ -265,7 +289,7 @@ async function loadAccounts() {
     }
 }
 
-// 渲染账号列表
+// 娓叉煋璐﹀彿鍒楄〃
 function renderAccounts(accounts) {
     if (accounts.length === 0) {
         elements.table.innerHTML = `
@@ -319,13 +343,13 @@ function renderAccounts(accounts) {
             <td>
                 <div style="display:flex;gap:4px;align-items:center;white-space:nowrap;">
                     <button class="btn btn-secondary btn-sm" onclick="viewAccount(${account.id})">详情</button>
-                    <button class="btn btn-secondary btn-sm" onclick="checkInboxCode(${account.id})">收件箱</button>
+                    <button class="btn btn-secondary btn-sm" onclick="checkInboxCode(${account.id}, '${escapeHtml(account.email_service)}')">收件箱</button>
                     <div class="dropdown" style="position:relative;">
                         <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();toggleMoreMenu(this)">更多</button>
                         <div class="dropdown-menu" style="min-width:100px;">
                             <a href="#" class="dropdown-item" onclick="event.preventDefault();closeMoreMenu(this);refreshToken(${account.id})">刷新</a>
                             <a href="#" class="dropdown-item" onclick="event.preventDefault();closeMoreMenu(this);uploadAccount(${account.id})">上传</a>
-                            <a href="#" class="dropdown-item" onclick="event.preventDefault();closeMoreMenu(this);markSubscription(${account.id})">标记</a>
+                            <a href="#" class="dropdown-item" onclick="event.preventDefault();closeMoreMenu(this);markSubscription(${account.id}, '${escapeHtml(normalizeSubscriptionType(account.subscription_type))}')">标记</a>
                         </div>
                     </div>
                     <button class="btn btn-danger btn-sm" onclick="deleteAccount(${account.id}, '${escapeHtml(account.email)}')">删除</button>
@@ -334,7 +358,6 @@ function renderAccounts(accounts) {
         </tr>
     `).join('');
 
-    // 绑定复选框事件
     elements.table.querySelectorAll('input[type="checkbox"][data-id]').forEach(cb => {
         cb.addEventListener('change', (e) => {
             const id = parseInt(e.target.dataset.id);
@@ -344,7 +367,6 @@ function renderAccounts(accounts) {
                 selectedAccounts.delete(id);
                 selectAllPages = false;
             }
-            // 同步全选框状态
             const allChecked = elements.table.querySelectorAll('input[type="checkbox"][data-id]');
             const checkedCount = elements.table.querySelectorAll('input[type="checkbox"][data-id]:checked').length;
             elements.selectAll.checked = allChecked.length > 0 && checkedCount === allChecked.length;
@@ -354,7 +376,6 @@ function renderAccounts(accounts) {
         });
     });
 
-    // 绑定复制邮箱按钮
     elements.table.querySelectorAll('.copy-email-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -362,7 +383,6 @@ function renderAccounts(accounts) {
         });
     });
 
-    // 绑定复制密码按钮
     elements.table.querySelectorAll('.copy-pwd-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -370,7 +390,6 @@ function renderAccounts(accounts) {
         });
     });
 
-    // 渲染后同步全选框状态
     const allCbs = elements.table.querySelectorAll('input[type="checkbox"][data-id]');
     const checkedCbs = elements.table.querySelectorAll('input[type="checkbox"][data-id]:checked');
     elements.selectAll.checked = allCbs.length > 0 && checkedCbs.length === allCbs.length;
@@ -421,7 +440,7 @@ function renderSubscriptionStatus(subscriptionType) {
     `;
 }
 
-// 切换密码显示
+// 鍒囨崲瀵嗙爜鏄剧ず
 function togglePassword(element, password) {
     if (element.dataset.revealed === 'true') {
         element.textContent = password.substring(0, 4) + '****';
@@ -434,7 +453,7 @@ function togglePassword(element, password) {
     }
 }
 
-// 更新分页
+// 鏇存柊鍒嗛〉
 function updatePagination() {
     const totalPages = Math.max(1, Math.ceil(totalAccounts / pageSize));
 
@@ -444,7 +463,7 @@ function updatePagination() {
     elements.pageInfo.textContent = `第 ${currentPage} 页 / 共 ${totalPages} 页`;
 }
 
-// 重置全选所有页状态
+// 閲嶇疆鍏ㄩ€夋墍鏈夐〉鐘舵€?
 function resetSelectAllPages() {
     selectAllPages = false;
     selectedAccounts.clear();
@@ -452,7 +471,7 @@ function resetSelectAllPages() {
     renderSelectAllBanner();
 }
 
-// 构建批量请求体（含 select_all 和筛选参数）
+// 鏋勫缓鎵归噺璇锋眰浣擄紙鍚?select_all 鍜岀瓫閫夊弬鏁帮級
 function buildBatchPayload(extraFields = {}) {
     if (selectAllPages) {
         return {
@@ -467,12 +486,12 @@ function buildBatchPayload(extraFields = {}) {
     return { ids: Array.from(selectedAccounts), ...extraFields };
 }
 
-// 获取有效选中数量（select_all 时用总数）
+// 鑾峰彇鏈夋晥閫変腑鏁伴噺锛坰elect_all 鏃剁敤鎬绘暟锛?
 function getEffectiveCount() {
     return selectAllPages ? totalAccounts : selectedAccounts.size;
 }
 
-// 渲染全选横幅
+// 娓叉煋鍏ㄩ€夋í骞?
 function renderSelectAllBanner() {
     let banner = document.getElementById('select-all-banner');
     const totalPages = Math.ceil(totalAccounts / pageSize);
@@ -480,7 +499,7 @@ function renderSelectAllBanner() {
     const checkedOnPage = elements.table.querySelectorAll('input[type="checkbox"][data-id]:checked').length;
     const allPageSelected = currentPageSize > 0 && checkedOnPage === currentPageSize;
 
-    // 只在全选了当前页且有多页时显示横幅
+    // 鍙湪鍏ㄩ€変簡褰撳墠椤典笖鏈夊椤垫椂鏄剧ず妯箙
     if (!allPageSelected || totalPages <= 1 || totalAccounts <= pageSize) {
         if (banner) banner.remove();
         return;
@@ -501,16 +520,17 @@ function renderSelectAllBanner() {
     }
 }
 
-// 选中所有页
+// 閫変腑鎵€鏈夐〉
 function selectAllPagesAction() {
     selectAllPages = true;
     updateBatchButtons();
     renderSelectAllBanner();
 }
 
-// 更新批量操作按钮
+// 鏇存柊鎵归噺鎿嶄綔鎸夐挳
 function updateBatchButtons() {
     const count = getEffectiveCount();
+    elements.batchRelayImportBtn.disabled = count === 0;
     elements.batchDeleteBtn.disabled = count === 0;
     elements.batchRefreshBtn.disabled = count === 0;
     elements.batchValidateBtn.disabled = count === 0;
@@ -518,14 +538,99 @@ function updateBatchButtons() {
     elements.batchCheckSubBtn.disabled = count === 0;
     elements.exportBtn.disabled = count === 0;
 
-    elements.batchDeleteBtn.textContent = count > 0 ? `🗑️ 删除 (${count})` : '🗑️ 批量删除';
-    elements.batchRefreshBtn.textContent = count > 0 ? `🔄 刷新 (${count})` : '🔄 刷新Token';
-    elements.batchValidateBtn.textContent = count > 0 ? `✅ 验证 (${count})` : '✅ 验证Token';
-    elements.batchUploadBtn.textContent = count > 0 ? `☁️ 上传 (${count})` : '☁️ 上传';
-    elements.batchCheckSubBtn.textContent = count > 0 ? `🔍 检测 (${count})` : '🔍 检测订阅';
+    elements.batchRelayImportBtn.textContent = count > 0 ? `一键导入中转站 (${count})` : '一键导入中转站';
+    elements.batchDeleteBtn.textContent = count > 0 ? `批量删除 (${count})` : '批量删除';
+    elements.batchRefreshBtn.textContent = count > 0 ? `刷新 Token (${count})` : '刷新 Token';
+    elements.batchValidateBtn.textContent = count > 0 ? `验证 Token (${count})` : '验证 Token';
+    elements.batchUploadBtn.textContent = count > 0 ? `上传 (${count})` : '上传';
+    elements.batchCheckSubBtn.textContent = count > 0 ? `检测订阅 (${count})` : '检测订阅';
 }
 
-// 刷新单个账号Token
+function showRelayImportResult(result) {
+    const details = Array.isArray(result?.details) ? result.details : [];
+    const rows = details.slice(0, 12).map((item) => {
+        const statusText = item.success ? '成功' : (item.partial ? '部分成功' : '失败');
+        const quotaText = item.quota_check?.success ? '通过' : (item.quota_check?.error || '失败');
+        const serviceMessages = [];
+        if (item.services?.cpa?.enabled) {
+            serviceMessages.push(`CPA: ${item.services.cpa.success ? '成功' : (item.services.cpa.message || '失败')}`);
+        }
+        if (item.services?.sub2api?.enabled) {
+            serviceMessages.push(`Sub2API: ${item.services.sub2api.success ? '成功' : (item.services.sub2api.message || '失败')}`);
+        }
+        return `
+            <tr>
+                <td>${item.id}</td>
+                <td>${escapeHtml(item.email || '-')}</td>
+                <td>${statusText}</td>
+                <td>${escapeHtml(quotaText)}</td>
+                <td>${escapeHtml(serviceMessages.join(' | ') || (item.error || '-'))}</td>
+            </tr>
+        `;
+    }).join('');
+
+    elements.modalBody.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:16px;">
+            <div>
+                <div style="font-size:1rem;font-weight:600;">中转站导入结果</div>
+                <div style="color:var(--text-muted);margin-top:6px;">
+                    成功 ${result.success_count || 0} 个，部分成功 ${result.partial_count || 0} 个，失败 ${result.failed_count || 0} 个
+                </div>
+            </div>
+            <div class="table-container">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th style="width:60px;">ID</th>
+                            <th>邮箱</th>
+                            <th style="width:90px;">结果</th>
+                            <th style="width:160px;">配额校验</th>
+                            <th>服务明细</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows || '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:16px;">暂无明细</td></tr>'}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `;
+    elements.detailModal.classList.add('active');
+}
+
+async function handleBatchRelayImport() {
+    const count = getEffectiveCount();
+    if (count === 0) return;
+
+    const confirmed = await confirm(`确定要将选中的 ${count} 个账号一键导入中转站吗？导入前会先强制刷新配额，只有通过校验的账号才会导入 CPA 和 Sub2API。`);
+    if (!confirmed) return;
+
+    elements.batchRelayImportBtn.disabled = true;
+    elements.batchRelayImportBtn.textContent = '导入中...';
+
+    try {
+        const result = await api.post('/accounts/batch-import-relay', buildBatchPayload());
+        const successCount = result.success_count || 0;
+        const partialCount = result.partial_count || 0;
+        const failedCount = result.failed_count || 0;
+        const summary = `成功 ${successCount} 个，部分成功 ${partialCount} 个，失败 ${failedCount} 个`;
+
+        if (failedCount > 0 || partialCount > 0) {
+            toast.warning(summary);
+            showRelayImportResult(result);
+        } else {
+            toast.success(summary);
+        }
+
+        loadAccounts();
+    } catch (error) {
+        toast.error('一键导入中转站失败: ' + error.message);
+    } finally {
+        updateBatchButtons();
+    }
+}
+
+// 鍒锋柊鍗曚釜璐﹀彿Token
 async function refreshToken(id) {
     try {
         toast.info('正在刷新Token...');
@@ -542,7 +647,7 @@ async function refreshToken(id) {
     }
 }
 
-// 批量刷新Token
+// 鎵归噺鍒锋柊Token
 async function handleBatchRefresh() {
     const count = getEffectiveCount();
     if (count === 0) return;
@@ -564,7 +669,7 @@ async function handleBatchRefresh() {
     }
 }
 
-// 批量验证Token
+// 鎵归噺楠岃瘉Token
 async function handleBatchValidate() {
     if (getEffectiveCount() === 0) return;
 
@@ -582,7 +687,7 @@ async function handleBatchValidate() {
     }
 }
 
-// 查看账号详情
+// 鏌ョ湅璐﹀彿璇︽儏
 async function viewAccount(id) {
     try {
         const account = await api.get(`/accounts/${id}`);
@@ -722,7 +827,7 @@ async function bootstrapSessionToken(id) {
 
 async function editSessionToken(id, currentToken = '') {
     const current = String(currentToken || '');
-    const nextToken = window.prompt('请输入新的 Session Token（留空将清空）', current);
+    const nextToken = window.prompt('请输入新的 Session Token，留空将清空。', current);
     if (nextToken === null) return;
     try {
         await api.patch(`/accounts/${id}`, { session_token: String(nextToken).trim() });
@@ -735,12 +840,12 @@ async function editSessionToken(id, currentToken = '') {
     }
 }
 
-// 复制邮箱
+// 澶嶅埗閭
 function copyEmail(email) {
     copyToClipboard(email);
 }
 
-// 删除账号
+// 鍒犻櫎璐﹀彿
 async function deleteAccount(id, email) {
     const confirmed = await confirm(`确定要删除账号 ${email} 吗？此操作不可恢复。`);
     if (!confirmed) return;
@@ -756,7 +861,7 @@ async function deleteAccount(id, email) {
     }
 }
 
-// 批量删除
+// 鎵归噺鍒犻櫎
 async function handleBatchDelete() {
     const count = getEffectiveCount();
     if (count === 0) return;
@@ -776,7 +881,7 @@ async function handleBatchDelete() {
     }
 }
 
-// 导出账号
+// 瀵煎嚭璐﹀彿
 async function exportAccounts(format) {
     const count = getEffectiveCount();
     if (count === 0) {
@@ -799,10 +904,7 @@ async function exportAccounts(format) {
             throw new Error(`导出失败: HTTP ${response.status}`);
         }
 
-        // 获取文件内容
         const blob = await response.blob();
-
-        // 从 Content-Disposition 获取文件名
         const disposition = response.headers.get('Content-Disposition');
         let filename = `accounts_${Date.now()}.${(format === 'cpa' || format === 'sub2api') ? 'json' : format}`;
         if (disposition) {
@@ -812,7 +914,6 @@ async function exportAccounts(format) {
             }
         }
 
-        // 创建下载链接
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -829,7 +930,7 @@ async function exportAccounts(format) {
     }
 }
 
-// HTML 转义
+// HTML 杞箟
 function escapeHtml(text) {
     if (!text) return '';
     const div = document.createElement('div');
@@ -837,10 +938,10 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// ============== CPA 服务选择 ==============
+// ============== CPA 鏈嶅姟閫夋嫨 ==============
 
-// 弹出 CPA 服务选择框，返回 Promise<{cpa_service_id: number|null}|null>
-// null 表示用户取消，{cpa_service_id: null} 表示使用全局配置
+// 寮瑰嚭 CPA 鏈嶅姟閫夋嫨妗嗭紝杩斿洖 Promise<{cpa_service_id: number|null}|null>
+// null 琛ㄧず鐢ㄦ埛鍙栨秷锛寋cpa_service_id: null} 琛ㄧず浣跨敤鍏ㄥ眬閰嶇疆
 function selectCpaService() {
     return new Promise(async (resolve) => {
         const modal = document.getElementById('cpa-service-modal');
@@ -849,7 +950,6 @@ function selectCpaService() {
         const cancelBtn = document.getElementById('cancel-cpa-modal-btn');
         const globalBtn = document.getElementById('cpa-use-global-btn');
 
-        // 加载服务列表
         listEl.innerHTML = '<div style="text-align:center;color:var(--text-muted)">加载中...</div>';
         modal.classList.add('active');
 
@@ -907,7 +1007,7 @@ function selectCpaService() {
     });
 }
 
-// 统一上传入口：弹出目标选择
+// 缁熶竴涓婁紶鍏ュ彛锛氬脊鍑虹洰鏍囬€夋嫨
 async function uploadAccount(id) {
     const targets = [
         { label: '☁️ 上传到 CPA', value: 'cpa' },
@@ -944,10 +1044,10 @@ async function uploadAccount(id) {
     if (choice === 'tm') return uploadToTm(id);
 }
 
-// 上传单个账号到CPA
+// 涓婁紶鍗曚釜璐﹀彿鍒癈PA
 async function uploadToCpa(id) {
     const choice = await selectCpaService();
-    if (choice === null) return;  // 用户取消
+    if (choice === null) return;
 
     try {
         toast.info('正在上传到CPA...');
@@ -966,13 +1066,13 @@ async function uploadToCpa(id) {
     }
 }
 
-// 批量上传到CPA
+// 鎵归噺涓婁紶鍒癈PA
 async function handleBatchUploadCpa() {
     const count = getEffectiveCount();
     if (count === 0) return;
 
     const choice = await selectCpaService();
-    if (choice === null) return;  // 用户取消
+    if (choice === null) return;
 
     const confirmed = await confirm(`确定要将选中的 ${count} 个账号上传到CPA吗？`);
     if (!confirmed) return;
@@ -998,28 +1098,74 @@ async function handleBatchUploadCpa() {
     }
 }
 
-// ============== 订阅状态 ==============
+// ============== 璁㈤槄鐘舵€?==============
 
-// 手动标记订阅类型
-async function markSubscription(id) {
-    const type = prompt('请输入订阅类型 (plus / team / free):', 'plus');
+// 鎵嬪姩鏍囪璁㈤槄绫诲瀷
+function chooseSubscriptionType(currentType = 'free') {
+    const options = [
+        { value: 'free', label: 'FREE', description: '\u65e0\u8ba2\u9605\u6216\u65e0\u4f18\u60e0' },
+        { value: 'plus', label: 'PLUS', description: '\u624b\u52a8\u6807\u8bb0\u4e3a Plus' },
+        { value: 'team', label: 'TEAM', description: '\u624b\u52a8\u6807\u8bb0\u4e3a Team / \u4f18\u60e0\u8d26\u53f7' },
+    ];
+    const current = normalizeSubscriptionType(currentType);
+
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.className = 'modal active';
+        modal.innerHTML = `
+            <div class="modal-content" style="max-width: 420px;">
+                <div class="modal-header">
+                    <h3>\u9009\u62e9\u8ba2\u9605\u6807\u8bb0</h3>
+                    <button class="modal-close" type="button" data-role="close">&times;</button>
+                </div>
+                <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;">
+                    <div style="color:var(--text-muted);font-size:0.9rem;">\u8bf7\u9009\u62e9\u8981\u5199\u5165\u5f53\u524d\u8d26\u53f7\u7684\u8ba2\u9605\u72b6\u6001\u3002</div>
+                    ${options.map((option) => `
+                        <button
+                            type="button"
+                            data-value="${option.value}"
+                            class="btn ${option.value === current ? 'btn-primary' : 'btn-secondary'}"
+                            style="text-align:left;display:flex;flex-direction:column;align-items:flex-start;gap:4px;"
+                        >
+                            <span>${option.label}</span>
+                            <span style="font-size:0.8rem;color:var(--text-muted);font-weight:400;">${option.description}</span>
+                        </button>`).join('')}
+                </div>
+            </div>`;
+
+        const cleanup = (value = null) => {
+            modal.remove();
+            resolve(value);
+        };
+
+        modal.addEventListener('click', (event) => {
+            if (event.target === modal) {
+                cleanup(null);
+            }
+        });
+
+        document.body.appendChild(modal);
+        modal.querySelector('[data-role="close"]')?.addEventListener('click', () => cleanup(null));
+        modal.querySelectorAll('[data-value]').forEach((button) => {
+            button.addEventListener('click', () => cleanup(button.dataset.value || null));
+        });
+    });
+}
+
+async function markSubscription(id, currentType = 'free') {
+    const type = await chooseSubscriptionType(currentType);
     if (!type) return;
-    if (!['plus', 'team', 'free'].includes(type.trim().toLowerCase())) {
-        toast.error('无效的订阅类型，请输入 plus、team 或 free');
-        return;
-    }
     try {
         await api.post(`/payment/accounts/${id}/mark-subscription`, {
-            subscription_type: type.trim().toLowerCase()
+            subscription_type: type
         });
-        toast.success('订阅状态已更新');
+        toast.success('\u8ba2\u9605\u72b6\u6001\u5df2\u66f4\u65b0');
         loadAccounts();
     } catch (e) {
-        toast.error('标记失败: ' + e.message);
+        toast.error('\u6807\u8bb0\u5931\u8d25: ' + e.message);
     }
 }
 
-// 批量检测订阅状态
 async function handleBatchCheckSubscription() {
     const count = getEffectiveCount();
     if (count === 0) return;
@@ -1042,10 +1188,10 @@ async function handleBatchCheckSubscription() {
     }
 }
 
-// ============== Sub2API 上传 ==============
+// ============== Sub2API 涓婁紶 ==============
 
-// 弹出 Sub2API 服务选择框，返回 Promise<{service_id: number|null}|null>
-// null 表示用户取消，{service_id: null} 表示自动选择
+// 寮瑰嚭 Sub2API 鏈嶅姟閫夋嫨妗嗭紝杩斿洖 Promise<{service_id: number|null}|null>
+// null 琛ㄧず鐢ㄦ埛鍙栨秷锛寋service_id: null} 琛ㄧず鑷姩閫夋嫨
 function selectSub2ApiService() {
     return new Promise(async (resolve) => {
         const modal = document.getElementById('sub2api-service-modal');
@@ -1111,13 +1257,13 @@ function selectSub2ApiService() {
     });
 }
 
-// 批量上传到 Sub2API
+// 鎵归噺涓婁紶鍒?Sub2API
 async function handleBatchUploadSub2Api() {
     const count = getEffectiveCount();
     if (count === 0) return;
 
     const choice = await selectSub2ApiService();
-    if (choice === null) return;  // 用户取消
+    if (choice === null) return;
 
     const confirmed = await confirm(`确定要将选中的 ${count} 个账号上传到 Sub2API 吗？`);
     if (!confirmed) return;
@@ -1143,9 +1289,9 @@ async function handleBatchUploadSub2Api() {
     }
 }
 
-// ============== Team Manager 上传 ==============
+// ============== Team Manager 涓婁紶 ==============
 
-// 上传单账号到 Sub2API
+// 涓婁紶鍗曡处鍙峰埌 Sub2API
 async function uploadToSub2Api(id) {
     const choice = await selectSub2ApiService();
     if (choice === null) return;
@@ -1165,8 +1311,8 @@ async function uploadToSub2Api(id) {
     }
 }
 
-// 弹出 Team Manager 服务选择框，返回 Promise<{service_id: number|null}|null>
-// null 表示用户取消，{service_id: null} 表示自动选择
+// 寮瑰嚭 Team Manager 鏈嶅姟閫夋嫨妗嗭紝杩斿洖 Promise<{service_id: number|null}|null>
+// null 琛ㄧず鐢ㄦ埛鍙栨秷锛寋service_id: null} 琛ㄧず鑷姩閫夋嫨
 function selectTmService() {
     return new Promise(async (resolve) => {
         const modal = document.getElementById('tm-service-modal');
@@ -1232,7 +1378,7 @@ function selectTmService() {
     });
 }
 
-// 上传单账号到 Team Manager
+// 涓婁紶鍗曡处鍙峰埌 Team Manager
 async function uploadToTm(id) {
     const choice = await selectTmService();
     if (choice === null) return;
@@ -1251,13 +1397,13 @@ async function uploadToTm(id) {
     }
 }
 
-// 批量上传到 Team Manager
+// 鎵归噺涓婁紶鍒?Team Manager
 async function handleBatchUploadTm() {
     const count = getEffectiveCount();
     if (count === 0) return;
 
     const choice = await selectTmService();
-    if (choice === null) return;  // 用户取消
+    if (choice === null) return;
 
     const confirmed = await confirm(`确定要将选中的 ${count} 个账号上传到 Team Manager 吗？`);
     if (!confirmed) return;
@@ -1281,11 +1427,11 @@ async function handleBatchUploadTm() {
     }
 }
 
-// 更多菜单切换
+// 鏇村鑿滃崟鍒囨崲
 function toggleMoreMenu(btn) {
     const menu = btn.nextElementSibling;
     const isActive = menu.classList.contains('active');
-    // 关闭所有其他更多菜单
+    // 鍏抽棴鎵€鏈夊叾浠栨洿澶氳彍鍗?
     document.querySelectorAll('.dropdown-menu.active').forEach(m => m.classList.remove('active'));
     if (!isActive) menu.classList.add('active');
 }
@@ -1295,7 +1441,7 @@ function closeMoreMenu(el) {
     if (menu) menu.classList.remove('active');
 }
 
-// 保存账号 Cookies
+// 淇濆瓨璐﹀彿 Cookies
 async function saveCookies(id) {
     const textarea = document.getElementById(`cookies-input-${id}`);
     if (!textarea) return;
@@ -1308,15 +1454,28 @@ async function saveCookies(id) {
     }
 }
 
-// 查询收件箱验证码
-async function checkInboxCode(id) {
+// 鏌ヨ鏀朵欢绠遍獙璇佺爜
+async function checkInboxCode(id, emailService = '') {
     toast.info('正在查询收件箱...');
     try {
         const result = await api.post(`/accounts/${id}/inbox-code`);
         if (result.success) {
+            if (String(emailService).toLowerCase() === 'outlook' && result.code) {
+                const copied = await copyToClipboard(result.code, { preferLegacy: true, silent: true });
+                if (!copied) {
+                    toast.warning(`已获取验证码: ${result.code}`);
+                } else {
+                    toast.success(`验证码已复制: ${result.code}`);
+                }
+            }
             showInboxCodeResult(result.code, result.email);
         } else {
-            toast.error('查询失败: ' + (result.error || '未收到验证码'));
+            const message = result.message || result.error || '未收到验证码';
+            if (String(emailService).toLowerCase() === 'outlook') {
+                toast.warning(message);
+            } else {
+                toast.error('查询失败: ' + message);
+            }
         }
     } catch (error) {
         toast.error('查询失败: ' + error.message);

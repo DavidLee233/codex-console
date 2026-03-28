@@ -1109,6 +1109,7 @@ async def get_available_email_services():
     - moe_mail: 已配置的自定义域名服务
     """
     from ...database.models import EmailService as EmailServiceModel
+    from ...database.models import Account
     from ...config.settings import get_settings
 
     settings = get_settings()
@@ -1156,24 +1157,34 @@ async def get_available_email_services():
     }
 
     with get_db() as db:
-        # 获取 Outlook 账户
+        # ????????????? Outlook ??
         outlook_services = db.query(EmailServiceModel).filter(
             EmailServiceModel.service_type == "outlook",
             EmailServiceModel.enabled == True
         ).order_by(EmailServiceModel.priority.asc()).all()
 
+        existing_outlook_emails = {
+            (email or "").strip().lower()
+            for (email,) in db.query(Account.email).all()
+            if email
+        }
+
         for service in outlook_services:
             config = service.config or {}
+            email = (config.get("email") or service.name or "").strip()
+            if email.lower() in existing_outlook_emails:
+                continue
             result["outlook"]["services"].append({
                 "id": service.id,
                 "name": service.name,
                 "type": "outlook",
+                "email": email,
                 "has_oauth": bool(config.get("client_id") and config.get("refresh_token")),
                 "priority": service.priority
             })
 
-        result["outlook"]["count"] = len(outlook_services)
-        result["outlook"]["available"] = len(outlook_services) > 0
+        result["outlook"]["count"] = len(result["outlook"]["services"])
+        result["outlook"]["available"] = len(result["outlook"]["services"]) > 0
 
         # 获取自定义域名服务
         custom_services = db.query(EmailServiceModel).filter(
@@ -1308,26 +1319,25 @@ async def get_outlook_accounts_for_registration():
 
         for service in outlook_services:
             config = service.config or {}
-            email = config.get("email") or service.name
+            email = (config.get("email") or service.name or "").strip()
 
-            # 检查是否已注册（查询 accounts 表）
+            # ?????????? accounts ??
             existing_account = db.query(Account).filter(
                 Account.email == email
             ).first()
 
-            is_registered = existing_account is not None
-            if is_registered:
+            if existing_account is not None:
                 registered_count += 1
-            else:
-                unregistered_count += 1
+                continue
 
+            unregistered_count += 1
             accounts.append(OutlookAccountForRegistration(
                 id=service.id,
                 email=email,
                 name=service.name,
                 has_oauth=bool(config.get("client_id") and config.get("refresh_token")),
-                is_registered=is_registered,
-                registered_account_id=existing_account.id if existing_account else None
+                is_registered=False,
+                registered_account_id=None
             ))
 
         return OutlookAccountsListResponse(

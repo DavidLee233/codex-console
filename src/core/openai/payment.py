@@ -910,6 +910,77 @@ def _map_plan_to_subscription(plan: Optional[str]) -> Optional[str]:
     return None
 
 
+def _detect_promotional_paid_offer(data: Any) -> Optional[str]:
+    if not isinstance(data, (dict, list)):
+        return None
+
+    try:
+        text = json.dumps(data, ensure_ascii=False, default=str).lower()
+    except Exception:
+        text = str(data).lower()
+
+    if not text or text in {"{}", "[]", "null"}:
+        return None
+
+    exact_markers = (
+        "plus-1-month-free",
+        "team-1-month-free",
+        "business-1-month-free",
+        "plus_one_month_free",
+        "team_one_month_free",
+        "business_one_month_free",
+    )
+    if any(marker in text for marker in exact_markers):
+        return "promo_campaign"
+
+    paid_plan_markers = (
+        "plus",
+        "team",
+        "business",
+        "enterprise",
+        "pro",
+        "chatgptplusplan",
+        "chatgptteamplan",
+    )
+    offer_markers = (
+        "promo",
+        "promotion",
+        "trial",
+        "coupon",
+        "discount",
+        "offer",
+        "eligible",
+        "eligibility",
+    )
+    zero_cost_markers = (
+        "1 month free",
+        "one month free",
+        "month free",
+        "free month",
+        "free_trial",
+        "trial_period",
+        "\"amount\": 0",
+        "\"amount\":0",
+        "\"price\": 0",
+        "\"price\":0",
+        "\"cost\": 0",
+        "\"cost\":0",
+        "\"total\": 0",
+        "\"total\":0",
+        "\"discounted_amount\": 0",
+        "\"discounted_amount\":0",
+        "0.00",
+        "0元",
+    )
+    if any(plan in text for plan in paid_plan_markers) and any(marker in text for marker in offer_markers):
+        if any(marker in text for marker in zero_cost_markers):
+            return "zero_cost_offer"
+        if "trial" in text or "promo" in text:
+            return "trial_offer"
+
+    return None
+
+
 def check_subscription_status_detail(account: Account, proxy: Optional[str] = None) -> Dict[str, Any]:
     """
     检测账号当前订阅状态。
@@ -959,6 +1030,10 @@ def check_subscription_status_detail(account: Account, proxy: Optional[str] = No
         nonlocal weak_free_source, explicit_free_source, explicit_free_value
         if not isinstance(data, dict):
             return None
+
+        offer_marker = _detect_promotional_paid_offer(data)
+        if offer_marker:
+            return _result("team", f"{source_prefix}.{offer_marker}", "medium", note="promo_offer_detected")
 
         candidates = [
             data.get("plan_type"),
@@ -1024,6 +1099,11 @@ def check_subscription_status_detail(account: Account, proxy: Optional[str] = No
         nonlocal weak_free_source, explicit_free_value
         if not isinstance(data, dict):
             return None
+
+        offer_marker = _detect_promotional_paid_offer(data)
+        if offer_marker:
+            return _result("team", f"{source_prefix}.{offer_marker}", "medium", note="promo_offer_detected")
+
         usage_candidates = [
             data.get("plan_type"),
             data.get("plan"),
@@ -1121,6 +1201,9 @@ def check_subscription_status_detail(account: Account, proxy: Optional[str] = No
         account_check_resp.raise_for_status()
         successful_sources.append("wham_accounts_check")
         account_check_data = account_check_resp.json() if account_check_resp.content else {}
+        offer_marker = _detect_promotional_paid_offer(account_check_data)
+        if offer_marker:
+            return _result("team", f"wham_accounts_check.{offer_marker}", "medium", note="promo_offer_detected")
         for raw in _collect_plan_candidates(account_check_data):
             mapped = _map_plan_to_subscription(raw)
             if mapped in ("plus", "team"):
@@ -1169,6 +1252,19 @@ def check_subscription_status_detail(account: Account, proxy: Optional[str] = No
             account_check_no_scope_resp.raise_for_status()
             successful_sources.append("wham_accounts_check_no_scope")
             account_check_no_scope_data = account_check_no_scope_resp.json() if account_check_no_scope_resp.content else {}
+            offer_marker = _detect_promotional_paid_offer(account_check_no_scope_data)
+            if offer_marker:
+                logger.info(
+                    "订阅检测 accounts/check 无作用域复核命中优惠: email=%s source=%s",
+                    account.email,
+                    offer_marker,
+                )
+                return _result(
+                    "team",
+                    f"wham_accounts_check.no_scope.{offer_marker}",
+                    "medium",
+                    note="promo_offer_detected",
+                )
             for raw in _collect_plan_candidates(account_check_no_scope_data):
                 mapped = _map_plan_to_subscription(raw)
                 if mapped in ("plus", "team"):
@@ -1183,6 +1279,9 @@ def check_subscription_status_detail(account: Account, proxy: Optional[str] = No
     try:
         overview = fetch_codex_overview(account, proxy=proxy)
         successful_sources.append("overview")
+        offer_marker = _detect_promotional_paid_offer(overview)
+        if offer_marker:
+            return _result("team", f"overview.{offer_marker}", "low", note="promo_offer_detected")
         mapped = _map_plan_to_subscription(overview.get("plan_type"))
         if mapped in ("plus", "team"):
             return _result(mapped, f"overview.{overview.get('plan_source') or 'plan'}", "medium")

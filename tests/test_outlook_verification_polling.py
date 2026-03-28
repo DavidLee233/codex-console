@@ -7,7 +7,12 @@ from src.database.models import Base, EmailService
 from src.database.session import DatabaseSessionManager
 from src.services.outlook.base import EmailMessage, ProviderType
 from src.services.outlook.email_parser import EmailParser
-from src.services.outlook.service import OutlookService
+from src.services.outlook.service import (
+    OUTLOOK_POLL_MAX_ROUNDS,
+    OUTLOOK_POLL_PREFER_UNSEEN_ROUNDS,
+    OutlookService,
+)
+from src.web.routes import accounts as accounts_routes
 from src.web.routes import email as email_routes
 
 
@@ -165,6 +170,41 @@ def test_outlook_get_verification_code_found_in_junk_graph(monkeypatch):
     assert code == "123456"
 
 
+def test_outlook_get_verification_code_uses_five_rounds_and_relaxes_after_three(monkeypatch):
+    service = _build_test_service()
+    observed_rounds = []
+
+    monkeypatch.setattr(
+        "src.services.outlook.service.get_email_code_settings",
+        lambda: {"timeout": 30, "poll_interval": 0},
+    )
+    monkeypatch.setattr(
+        service,
+        "_try_providers_for_emails",
+        lambda account, count, only_unseen, mailboxes, deadline_ts: observed_rounds.append(
+            only_unseen
+        )
+        or [],
+    )
+    monkeypatch.setattr(
+        service.email_parser,
+        "find_verification_code_in_emails",
+        lambda emails, **kwargs: None,
+    )
+    monkeypatch.setattr("src.services.outlook.service.time.sleep", lambda *_args, **_kwargs: None)
+
+    code = service.get_verification_code(
+        email="tester@outlook.com",
+        timeout=30,
+        otp_sent_at=time.time(),
+        max_poll_rounds=OUTLOOK_POLL_MAX_ROUNDS,
+        prefer_unseen_rounds=OUTLOOK_POLL_PREFER_UNSEEN_ROUNDS,
+    )
+
+    assert code is None
+    assert observed_rounds == [True, True, True, False, False]
+
+
 def test_email_parser_preview_and_any_sender_fallback():
     parser = EmailParser()
     now_ts = int(time.time())
@@ -241,8 +281,16 @@ def test_outlook_inbox_route_returns_code(monkeypatch):
         finally:
             session.close()
 
+    captured = {}
+
     class FakeOutlookService:
         def get_verification_code(self, email, email_id=None, timeout=None, pattern=None, otp_sent_at=None, **kwargs):
+            captured["email"] = email
+            captured["email_id"] = email_id
+            captured["timeout"] = timeout
+            captured["pattern"] = pattern
+            captured["otp_sent_at"] = otp_sent_at
+            captured.update(kwargs)
             return "654321"
 
     monkeypatch.setattr(email_routes, "get_db", fake_get_db)
@@ -251,6 +299,8 @@ def test_outlook_inbox_route_returns_code(monkeypatch):
     result = asyncio.run(email_routes.get_outlook_latest_inbox_code(service_id))
     assert result.success is True
     assert result.code == "654321"
+    assert captured["prefer_unseen_rounds"] == OUTLOOK_POLL_PREFER_UNSEEN_ROUNDS
+    assert captured["max_poll_rounds"] == OUTLOOK_POLL_MAX_ROUNDS
 
 
 def test_outlook_test_route_triggers_and_receives_code(monkeypatch):
@@ -307,7 +357,168 @@ def test_outlook_test_route_triggers_and_receives_code(monkeypatch):
     assert captured["trigger_email"] == "tester@outlook.com"
     assert captured["allow_any_sender"] is True
     assert captured["lookback_seconds"] == 120
-    assert captured["prefer_unseen_rounds"] == 0
+    assert captured["prefer_unseen_rounds"] == OUTLOOK_POLL_PREFER_UNSEEN_ROUNDS
     assert captured["fetch_count"] == 120
-    assert captured["strict_unseen_only"] is True
+    assert captured["strict_unseen_only"] is False
+    assert captured["max_poll_rounds"] == OUTLOOK_POLL_MAX_ROUNDS
     assert captured["timeout"] == 75
+
+
+def test_account_outlook_inbox_route_uses_outlook_poll_profile(monkeypatch):
+    runtime_dir = Path("tests_runtime")
+    runtime_dir.mkdir(exist_ok=True)
+    db_path = runtime_dir / "account_outlook_inbox_route.db"
+    if db_path.exists():
+        db_path.unlink()
+
+    manager = DatabaseSessionManager(f"sqlite:///{db_path}")
+    Base.metadata.create_all(bind=manager.engine)
+
+    with manager.session_scope() as session:
+        svc = EmailService(
+            service_type="outlook",
+            name="tester@outlook.com",
+            config={"email": "tester@outlook.com", "password": "pwd"},
+            enabled=True,
+            priority=0,
+        )
+        session.add(svc)
+        session.flush()
+
+        from src.database.models import Account
+
+        account = Account(
+            email="tester@outlook.com",
+            password="pwd",
+            email_service="outlook",
+            email_service_id=str(svc.id),
+            status="active",
+        )
+        session.add(account)
+        session.flush()
+        account_id = account.id
+
+    @contextmanager
+    def fake_get_db():
+        session = manager.SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    captured = {}
+
+    class FakeOutlookService:
+        def get_verification_code(self, email, email_id=None, timeout=None, pattern=None, otp_sent_at=None, **kwargs):
+            captured["email"] = email
+            captured["email_id"] = email_id
+            captured["timeout"] = timeout
+            captured["pattern"] = pattern
+            captured["otp_sent_at"] = otp_sent_at
+            captured.update(kwargs)
+            return "888999"
+
+    monkeypatch.setattr(accounts_routes, "get_db", fake_get_db)
+    monkeypatch.setattr("src.services.EmailServiceFactory.create", lambda *args, **kwargs: FakeOutlookService())
+
+    result = asyncio.run(accounts_routes.get_account_inbox_code(account_id))
+    assert result["success"] is True
+    assert result["code"] == "888999"
+    assert captured["email"] == "tester@outlook.com"
+    assert captured["lookback_seconds"] == 60
+    assert captured["prefer_unseen_rounds"] == OUTLOOK_POLL_PREFER_UNSEEN_ROUNDS
+    assert captured["strict_unseen_only"] is False
+    assert captured["max_poll_rounds"] == OUTLOOK_POLL_MAX_ROUNDS
+    assert captured["timeout"] == 60
+
+
+def test_account_tempmail_inbox_route_keeps_legacy_timeout(monkeypatch):
+    runtime_dir = Path("tests_runtime")
+    runtime_dir.mkdir(exist_ok=True)
+    db_path = runtime_dir / "account_tempmail_inbox_route.db"
+    if db_path.exists():
+        db_path.unlink()
+
+    manager = DatabaseSessionManager(f"sqlite:///{db_path}")
+    Base.metadata.create_all(bind=manager.engine)
+
+    with manager.session_scope() as session:
+        from src.database.models import Account
+
+        account = Account(
+            email="tester@example.com",
+            password="pwd",
+            email_service="tempmail",
+            email_service_id="token-1",
+            status="active",
+        )
+        session.add(account)
+        session.flush()
+        account_id = account.id
+
+    @contextmanager
+    def fake_get_db():
+        session = manager.SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    captured = {}
+
+    class FakeTempMailService:
+        def get_verification_code(self, email, email_id=None, timeout=None, pattern=None, otp_sent_at=None, **kwargs):
+            captured["email"] = email
+            captured["email_id"] = email_id
+            captured["timeout"] = timeout
+            captured["kwargs"] = kwargs
+            return "112233"
+
+    monkeypatch.setattr(accounts_routes, "get_db", fake_get_db)
+    monkeypatch.setattr("src.services.EmailServiceFactory.create", lambda *args, **kwargs: FakeTempMailService())
+
+    result = asyncio.run(accounts_routes.get_account_inbox_code(account_id))
+    assert result["success"] is True
+    assert result["code"] == "112233"
+    assert captured["timeout"] == 12
+    assert captured["kwargs"] == {}
+
+def test_outlook_batch_import_persists_password_and_oauth_fields(monkeypatch):
+    runtime_dir = Path("tests_runtime")
+    runtime_dir.mkdir(exist_ok=True)
+    db_path = runtime_dir / "outlook_batch_import.db"
+    if db_path.exists():
+        db_path.unlink()
+
+    manager = DatabaseSessionManager(f"sqlite:///{db_path}")
+    Base.metadata.create_all(bind=manager.engine)
+
+    @contextmanager
+    def fake_get_db():
+        session = manager.SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    monkeypatch.setattr(email_routes, "get_db", fake_get_db)
+
+    request = email_routes.OutlookBatchImportRequest(
+        data="tester@outlook.com----pwd123----client-abc----refresh-xyz",
+        enabled=True,
+        priority=7,
+    )
+
+    result = asyncio.run(email_routes.batch_import_outlook(request))
+    assert result.success == 1
+    assert result.failed == 0
+
+    with manager.session_scope() as session:
+        service = session.query(EmailService).filter(EmailService.name == "tester@outlook.com").first()
+        assert service is not None
+        assert service.priority == 7
+        assert service.enabled is True
+        assert service.config["email"] == "tester@outlook.com"
+        assert service.config["password"] == "pwd123"
+        assert service.config["client_id"] == "client-abc"
+        assert service.config["refresh_token"] == "refresh-xyz"

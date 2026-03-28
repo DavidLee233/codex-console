@@ -23,6 +23,8 @@ from .providers.graph_api import GraphAPIProvider
 
 logger = logging.getLogger(__name__)
 MAILBOX_POLL_SEQUENCE = ("INBOX", "JUNK")
+OUTLOOK_POLL_MAX_ROUNDS = 5
+OUTLOOK_POLL_PREFER_UNSEEN_ROUNDS = 3
 
 
 # 默认提供者优先级
@@ -33,6 +35,26 @@ DEFAULT_PROVIDER_PRIORITY = [
     ProviderType.IMAP_NEW,
     ProviderType.GRAPH_API,
 ]
+
+
+def build_outlook_code_poll_kwargs(
+    *,
+    timeout: int,
+    lookback_seconds: int,
+    fetch_count: int,
+    strict_unseen_only: bool = False,
+) -> Dict[str, Any]:
+    """Build a consistent polling profile for Outlook inbox/test actions."""
+    return {
+        "timeout": timeout,
+        "pattern": r"(?<!\d)(\d{6})(?!\d)",
+        "allow_any_sender": True,
+        "lookback_seconds": lookback_seconds,
+        "prefer_unseen_rounds": OUTLOOK_POLL_PREFER_UNSEEN_ROUNDS,
+        "fetch_count": fetch_count,
+        "strict_unseen_only": strict_unseen_only,
+        "max_poll_rounds": OUTLOOK_POLL_MAX_ROUNDS,
+    }
 
 
 def get_email_code_settings() -> dict:
@@ -395,9 +417,10 @@ class OutlookService(BaseEmailService):
         otp_sent_at: Optional[float] = None,
         allow_any_sender: bool = False,
         lookback_seconds: int = 60,
-        prefer_unseen_rounds: int = 3,
+        prefer_unseen_rounds: int = OUTLOOK_POLL_PREFER_UNSEEN_ROUNDS,
         fetch_count: int = 15,
         strict_unseen_only: bool = False,
+        max_poll_rounds: Optional[int] = None,
     ) -> Optional[str]:
         """
         从 Outlook 邮箱获取验证码
@@ -450,7 +473,9 @@ class OutlookService(BaseEmailService):
         deadline_ts = start_time + actual_timeout
         poll_count = 0
 
-        while time.time() < deadline_ts:
+        while time.time() < deadline_ts and (
+            max_poll_rounds is None or poll_count < max(0, int(max_poll_rounds))
+        ):
             poll_count += 1
 
             # 未读策略:

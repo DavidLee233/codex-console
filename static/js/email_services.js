@@ -72,6 +72,9 @@ const elements = {
     editOutlookForm: document.getElementById('edit-outlook-form'),
     closeEditOutlookModal: document.getElementById('close-edit-outlook-modal'),
     cancelEditOutlook: document.getElementById('cancel-edit-outlook'),
+    rawOutlookModal: document.getElementById('raw-outlook-modal'),
+    closeRawOutlookModal: document.getElementById('close-raw-outlook-modal'),
+    cancelRawOutlook: document.getElementById('cancel-raw-outlook'),
 };
 
 const CUSTOM_SUBTYPE_LABELS = {
@@ -155,6 +158,8 @@ function initEventListeners() {
     elements.closeEditOutlookModal.addEventListener('click', () => elements.editOutlookModal.classList.remove('active'));
     elements.cancelEditOutlook.addEventListener('click', () => elements.editOutlookModal.classList.remove('active'));
     elements.editOutlookForm.addEventListener('submit', handleEditOutlook);
+    elements.closeRawOutlookModal.addEventListener('click', () => elements.rawOutlookModal.classList.remove('active'));
+    elements.cancelRawOutlook.addEventListener('click', () => elements.rawOutlookModal.classList.remove('active'));
 
     // 临时邮箱配置
     elements.tempmailForm.addEventListener('submit', handleSaveTempmail);
@@ -254,6 +259,7 @@ async function loadOutlookServices() {
                                 <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);toggleService(${service.id}, ${!service.enabled})">${service.enabled ? '禁用' : '启用'}</a>
                                 <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);testOutlookService(${service.id})">测试</a>
                                 <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);fetchOutlookInboxCode(${service.id})">收件箱</a>
+                                <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);showOutlookRawInfo(${service.id})">原始信息</a>
                             </div>
                         </div>
                         <button class="btn btn-danger btn-sm" onclick="deleteService(${service.id}, '${escapeHtml(service.name)}')">删除</button>
@@ -465,6 +471,8 @@ async function handleAddCustom(e) {
         config = {
             base_url: formData.get('fm_base_url'),
             admin_token: formData.get('fm_admin_token'),
+            cf_access_client_id: formData.get('fm_cf_access_client_id'),
+            cf_access_client_secret: formData.get('fm_cf_access_client_secret'),
             domain: formData.get('fm_domain')
         };
     } else {
@@ -546,30 +554,14 @@ async function fetchOutlookInboxCode(id) {
             return;
         }
 
-        await copyTextToClipboard(result.code);
+        const copied = await copyToClipboard(result.code, { preferLegacy: true, silent: true });
+        if (!copied) {
+            toast.warning(`已获取验证码: ${result.code}`);
+            return;
+        }
         toast.success(`验证码已复制: ${result.code}`);
     } catch (error) {
         toast.error('收件箱查询失败: ' + error.message);
-    }
-}
-
-async function copyTextToClipboard(text) {
-    if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(text);
-        return;
-    }
-
-    const textarea = document.createElement('textarea');
-    textarea.value = text;
-    textarea.setAttribute('readonly', '');
-    textarea.style.position = 'fixed';
-    textarea.style.left = '-9999px';
-    document.body.appendChild(textarea);
-    textarea.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(textarea);
-    if (!ok) {
-        throw new Error('复制失败，请手动复制验证码');
     }
 }
 
@@ -701,6 +693,10 @@ async function editCustomService(id, subType) {
             document.getElementById('edit-fm-base-url').value = service.config?.base_url || '';
             document.getElementById('edit-fm-admin-token').value = '';
             document.getElementById('edit-fm-admin-token').placeholder = service.config?.admin_token ? '已设置，留空保持不变' : '请输入 Admin Token';
+            document.getElementById('edit-fm-cf-access-client-id').value = '';
+            document.getElementById('edit-fm-cf-access-client-id').placeholder = service.config?.cf_access_client_id ? '已设置，留空保持不变' : '请输入 CF Access Client ID';
+            document.getElementById('edit-fm-cf-access-client-secret').value = '';
+            document.getElementById('edit-fm-cf-access-client-secret').placeholder = service.config?.has_cf_access_client_secret ? '已设置，留空保持不变' : '请输入 CF Access Client Secret';
             document.getElementById('edit-fm-domain').value = service.config?.domain || '';
         } else {
             document.getElementById('edit-imap-host').value = service.config?.host || '';
@@ -755,6 +751,10 @@ async function handleEditCustom(e) {
         };
         const token = formData.get('fm_admin_token');
         if (token && token.trim()) config.admin_token = token.trim();
+        const clientId = formData.get('fm_cf_access_client_id');
+        if (clientId && clientId.trim()) config.cf_access_client_id = clientId.trim();
+        const clientSecret = formData.get('fm_cf_access_client_secret');
+        if (clientSecret && clientSecret.trim()) config.cf_access_client_secret = clientSecret.trim();
     } else {
         config = {
             host: formData.get('imap_host'),
@@ -800,6 +800,19 @@ async function editOutlookService(id) {
         elements.editOutlookModal.classList.add('active');
     } catch (error) {
         toast.error('获取服务信息失败: ' + error.message);
+    }
+}
+
+async function showOutlookRawInfo(id) {
+    try {
+        const service = await api.get(`/email-services/${id}/full`);
+        document.getElementById('raw-outlook-email').value = service.config?.email || service.name || '';
+        document.getElementById('raw-outlook-password').value = service.config?.password || '';
+        document.getElementById('raw-outlook-client-id').value = service.config?.client_id || '';
+        document.getElementById('raw-outlook-refresh-token').value = service.config?.refresh_token || '';
+        elements.rawOutlookModal.classList.add('active');
+    } catch (error) {
+        toast.error('获取原始信息失败: ' + error.message);
     }
 }
 

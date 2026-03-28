@@ -435,34 +435,56 @@ function confirm(message, title = '确认操作') {
 // 复制到剪贴板
 // ============================================
 
-async function copyToClipboard(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        try {
-            await navigator.clipboard.writeText(text);
-            toast.success('已复制到剪贴板');
-            return true;
-        } catch (err) {
-            // 降级到 execCommand
-        }
-    }
-    try {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
-        document.body.appendChild(ta);
-        ta.focus();
-        ta.select();
-        const ok = document.execCommand('copy');
-        document.body.removeChild(ta);
-        if (ok) {
-            toast.success('已复制到剪贴板');
-            return true;
-        }
-        throw new Error('execCommand failed');
-    } catch (err) {
-        toast.error('复制失败');
+function legacyCopyToClipboard(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+}
+
+async function copyToClipboard(text, options = {}) {
+    const preferLegacy = Boolean(options.preferLegacy);
+    const silent = Boolean(options.silent);
+    const successMessage = options.successMessage || '已复制到剪贴板';
+    const failureMessage = options.failureMessage || '复制失败';
+
+    const reportSuccess = () => {
+        if (!silent) toast.success(successMessage);
+        return true;
+    };
+    const reportFailure = () => {
+        if (!silent) toast.error(failureMessage);
         return false;
+    };
+
+    try {
+        if (preferLegacy && legacyCopyToClipboard(text)) {
+            return reportSuccess();
+        }
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return reportSuccess();
+            } catch (err) {
+                // 降级到 execCommand
+            }
+        }
+
+        if (legacyCopyToClipboard(text)) {
+            return reportSuccess();
+        }
+    } catch (err) {
+        // handled below
     }
+
+    return reportFailure();
 }
 
 // ============================================

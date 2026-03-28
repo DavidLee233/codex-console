@@ -279,6 +279,14 @@
                             <input type="password" id="custom-fm-admin-token" name="fm_admin_token" placeholder="JWT_TOKEN 值">
                         </div>
                         <div class="form-group">
+                            <label for="custom-fm-cf-access-client-id">CF Access Client ID</label>
+                            <input type="text" id="custom-fm-cf-access-client-id" name="fm_cf_access_client_id" placeholder="可选，启用 Cloudflare Access Service Token 时填写">
+                        </div>
+                        <div class="form-group">
+                            <label for="custom-fm-cf-access-client-secret">CF Access Client Secret</label>
+                            <input type="password" id="custom-fm-cf-access-client-secret" name="fm_cf_access_client_secret" placeholder="可选，启用 Cloudflare Access Service Token 时填写">
+                        </div>
+                        <div class="form-group">
                             <label for="custom-fm-domain">邮箱域名 (可选)</label>
                             <input type="text" id="custom-fm-domain" name="fm_domain" placeholder="example.com">
                         </div>
@@ -417,6 +425,16 @@
                             <small style="color: var(--text-muted);">留空则保持原值不变</small>
                         </div>
                         <div class="form-group">
+                            <label for="edit-fm-cf-access-client-id">CF Access Client ID</label>
+                            <input type="text" id="edit-fm-cf-access-client-id" name="fm_cf_access_client_id" placeholder="留空则不修改">
+                            <small style="color: var(--text-muted);">留空则保持原值不变</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="edit-fm-cf-access-client-secret">CF Access Client Secret</label>
+                            <input type="password" id="edit-fm-cf-access-client-secret" name="fm_cf_access_client_secret" placeholder="留空则不修改">
+                            <small style="color: var(--text-muted);">留空则保持原值不变</small>
+                        </div>
+                        <div class="form-group">
                             <label for="edit-fm-domain">邮箱域名 (可选)</label>
                             <input type="text" id="edit-fm-domain" name="fm_domain" placeholder="example.com">
                         </div>
@@ -514,6 +532,38 @@
                     <div class="form-actions">
                         <button type="submit" class="btn btn-primary">保存</button>
                         <button type="button" class="btn btn-secondary" id="cancel-edit-outlook">取消</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="raw-outlook-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>只读原始信息</h3>
+                <button class="modal-close" id="close-raw-outlook-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form>
+                    <div class="form-group">
+                        <label for="raw-outlook-email">邮箱地址</label>
+                        <input type="text" id="raw-outlook-email" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label for="raw-outlook-password">密码</label>
+                        <input type="text" id="raw-outlook-password" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label for="raw-outlook-client-id">OAuth Client ID</label>
+                        <input type="text" id="raw-outlook-client-id" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label for="raw-outlook-refresh-token">OAuth Refresh Token</label>
+                        <textarea id="raw-outlook-refresh-token" rows="4" readonly></textarea>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancel-raw-outlook">关闭</button>
                     </div>
                 </form>
             </div>
