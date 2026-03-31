@@ -323,7 +323,9 @@ class MeoMailEmailService(BaseEmailService):
                     content = f"{sender} {subject} {message_content}"
 
                     # 检查是否是 OpenAI 邮件
-                    if "openai" not in sender and "openai" not in content.lower():
+                    lowered = content.lower()
+                    if ("openai" not in sender and "openai" not in lowered
+                            and "chatgpt" not in sender and "chatgpt" not in lowered):
                         continue
 
                     # 提取验证码 过滤掉邮箱

@@ -47,11 +47,22 @@ let batchWsManualClose = false;
 
 const WS_RECONNECT_BASE_DELAY = 1000;
 const WS_RECONNECT_MAX_DELAY = 10000;
+const FREEMAIL_DOMAIN_MODES = {
+    SECOND_LEVEL: 'second_level',
+    THIRD_LEVEL: 'third_level',
+    THIRD_RANDOM: 'third_random',
+};
+const FREEMAIL_DEFAULT_SECOND_LEVEL_DOMAIN = 'kd7.icu';
+const FREEMAIL_DEFAULT_THIRD_LEVEL_DOMAIN = 'outlook.kd7.icu';
 
 // DOM 元素
 const elements = {
     form: document.getElementById('registration-form'),
     emailService: document.getElementById('email-service'),
+    freemailDomainGroup: document.getElementById('freemail-domain-group'),
+    freemailDomainMode: document.getElementById('freemail-domain-mode'),
+    freemailDomainInput: document.getElementById('freemail-domain-input'),
+    freemailDomainHelp: document.getElementById('freemail-domain-help'),
     regMode: document.getElementById('reg-mode'),
     regModeGroup: document.getElementById('reg-mode-group'),
     batchCountGroup: document.getElementById('batch-count-group'),
@@ -181,6 +192,11 @@ async function loadServiceSelect(apiPath, container, checkbox, selectGroup) {
     checkbox.addEventListener('change', () => {
         if (selectGroup) selectGroup.style.display = checkbox.checked ? 'block' : 'none';
     });
+
+    // 首次加载时同步一次显示状态（默认勾选时直接展开）
+    if (selectGroup) {
+        selectGroup.style.display = (!checkbox.disabled && checkbox.checked) ? 'block' : 'none';
+    }
 }
 
 function toggleMsd(ddId) {
@@ -216,6 +232,10 @@ function initEventListeners() {
 
     // 邮箱服务切换
     elements.emailService.addEventListener('change', handleServiceChange);
+    elements.freemailDomainMode?.addEventListener('change', () => {
+        const selected = getSelectedEmailService();
+        updateFreemailDomainControls(selected?.type === 'freemail' ? selected.service : null);
+    });
 
     // 取消按钮
     elements.cancelBtn.addEventListener('click', handleCancelTask);
@@ -249,6 +269,7 @@ async function loadAvailableServices() {
 
         // 更新邮箱服务选择框
         updateEmailServiceOptions();
+        handleServiceChange({ target: elements.emailService });
 
         addLog('info', '[系统] 邮箱服务列表已加载');
     } catch (error) {
@@ -409,11 +430,77 @@ function updateEmailServiceOptions() {
 }
 
 // 处理邮箱服务切换
+function getSelectedEmailService() {
+    const value = elements.emailService?.value || '';
+    if (!value) return null;
+    const [type, id] = value.split(':');
+    const groups = availableServices[type]?.services || [];
+    const service = groups.find(s => String(s.id ?? 'default') === String(id)) || null;
+    return { type, id, service };
+}
+
+function updateFreemailDomainControls(service) {
+    if (!elements.freemailDomainGroup || !elements.freemailDomainMode || !elements.freemailDomainInput || !elements.freemailDomainHelp) {
+        return;
+    }
+
+    if (!service) {
+        elements.freemailDomainGroup.style.display = 'none';
+        return;
+    }
+
+    const baseDomain = String(service.domain || 'kd7.icu').trim().toLowerCase();
+    const mode = String(elements.freemailDomainMode.value || FREEMAIL_DOMAIN_MODES.THIRD_RANDOM);
+    const isRandom = mode === FREEMAIL_DOMAIN_MODES.THIRD_RANDOM;
+    const isSecond = mode === FREEMAIL_DOMAIN_MODES.SECOND_LEVEL;
+
+    elements.freemailDomainGroup.style.display = 'block';
+    elements.freemailDomainInput.style.display = isRandom ? 'none' : 'block';
+
+    if (isSecond) {
+        elements.freemailDomainInput.placeholder = '二级示例：kd7.icu';
+        elements.freemailDomainHelp.textContent = '请输入完整二级域名，例如：kd7.icu。';
+        const currentValue = String(elements.freemailDomainInput.value || '').trim().toLowerCase();
+        if (!currentValue || currentValue === FREEMAIL_DEFAULT_THIRD_LEVEL_DOMAIN) {
+            elements.freemailDomainInput.value = FREEMAIL_DEFAULT_SECOND_LEVEL_DOMAIN;
+        }
+    } else if (isRandom) {
+        elements.freemailDomainHelp.textContent = `将为每个账号随机生成 3-8 位三级域名：*.${baseDomain}`;
+    } else {
+        elements.freemailDomainInput.placeholder = `三级示例：outlook 或 outlook.${baseDomain}`;
+        elements.freemailDomainHelp.textContent = `可输入三级前缀（如 outlook）或完整三级域名（如 outlook.${baseDomain}）。`;
+        const currentValue = String(elements.freemailDomainInput.value || '').trim().toLowerCase();
+        if (!currentValue || currentValue === FREEMAIL_DEFAULT_SECOND_LEVEL_DOMAIN) {
+            elements.freemailDomainInput.value = FREEMAIL_DEFAULT_THIRD_LEVEL_DOMAIN;
+        }
+    }
+}
+
+function buildFreemailEmailServiceConfig(service) {
+    const mode = String(elements.freemailDomainMode?.value || FREEMAIL_DOMAIN_MODES.THIRD_RANDOM);
+    const inputRaw = String(elements.freemailDomainInput?.value || '').trim().toLowerCase();
+    const baseDomain = String(service?.domain || 'kd7.icu').trim().toLowerCase();
+
+    if (mode !== FREEMAIL_DOMAIN_MODES.THIRD_RANDOM && !inputRaw) {
+        throw new Error('请选择 Freemail 域名后输入域名名称');
+    }
+
+    return {
+        domain_mode: mode,
+        domain_name: inputRaw,
+        base_domain: baseDomain,
+    };
+}
+
 function handleServiceChange(e) {
     const value = e.target.value;
-    if (!value) return;
+    if (!value) {
+        updateFreemailDomainControls(null);
+        return;
+    }
 
     const [type, id] = value.split(':');
+    updateFreemailDomainControls(null);
     // 处理 Outlook 批量注册模式
     if (type === 'outlook_batch') {
         isOutlookBatchMode = true;
@@ -459,6 +546,7 @@ function handleServiceChange(e) {
     } else if (type === 'freemail') {
         const service = availableServices.freemail.services.find(s => s.id == id);
         if (service) {
+            updateFreemailDomainControls(service);
             addLog('info', `[系统] 已选择 Freemail 服务: ${service.name}`);
         }
     }
@@ -524,6 +612,17 @@ async function handleStartRegistration(e) {
     // 如果选择了数据库中的服务，传递 service_id
     if (serviceId && serviceId !== 'default') {
         requestData.email_service_id = parseInt(serviceId);
+    }
+
+    if (emailServiceType === 'freemail') {
+        try {
+            const selected = getSelectedEmailService();
+            requestData.email_service_config = buildFreemailEmailServiceConfig(selected?.service || null);
+        } catch (error) {
+            toast.error(error.message || 'Freemail 域名参数无效');
+            resetButtons();
+            return;
+        }
     }
 
     if (isBatchMode) {

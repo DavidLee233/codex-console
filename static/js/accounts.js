@@ -30,6 +30,8 @@ const elements = {
     batchValidateBtn: document.getElementById('batch-validate-btn'),
     batchUploadBtn: document.getElementById('batch-upload-btn'),
     batchCheckSubBtn: document.getElementById('batch-check-sub-btn'),
+    historyAuditBtn: document.getElementById('history-audit-btn'),
+    historyRepairBtn: document.getElementById('history-repair-btn'),
     batchDeleteBtn: document.getElementById('batch-delete-btn'),
     exportBtn: document.getElementById('export-btn'),
     exportMenu: document.getElementById('export-menu'),
@@ -106,6 +108,8 @@ function initEventListeners() {
 
     // 鎵归噺妫€娴嬭闃?
     elements.batchCheckSubBtn.addEventListener('click', handleBatchCheckSubscription);
+    elements.historyAuditBtn?.addEventListener('click', handleHistoryTokenAudit);
+    elements.historyRepairBtn?.addEventListener('click', handleHistoryTokenRepair);
 
     // 涓婁紶涓嬫媺鑿滃崟
     const uploadMenu = document.getElementById('upload-menu');
@@ -486,6 +490,23 @@ function buildBatchPayload(extraFields = {}) {
     return { ids: Array.from(selectedAccounts), ...extraFields };
 }
 
+function buildTokenHealthPayload(extraFields = {}) {
+    if (selectAllPages) {
+        return buildBatchPayload(extraFields);
+    }
+    if (selectedAccounts.size > 0) {
+        return { ids: Array.from(selectedAccounts), ...extraFields };
+    }
+    return {
+        ids: [],
+        select_all: true,
+        status_filter: currentFilters.status || null,
+        email_service_filter: currentFilters.email_service || null,
+        search_filter: currentFilters.search || null,
+        ...extraFields,
+    };
+}
+
 // 鑾峰彇鏈夋晥閫変腑鏁伴噺锛坰elect_all 鏃剁敤鎬绘暟锛?
 function getEffectiveCount() {
     return selectAllPages ? totalAccounts : selectedAccounts.size;
@@ -596,6 +617,119 @@ function showRelayImportResult(result) {
         </div>
     `;
     elements.detailModal.classList.add('active');
+}
+
+function showTokenHealthResult(result, title = '历史账号体检结果') {
+    const details = Array.isArray(result?.details) ? result.details : [];
+    const rows = details.slice(0, 200).map((item) => {
+        const beforeMissing = Array.isArray(item.before_missing) ? item.before_missing.join(', ') : '-';
+        const afterMissing = Array.isArray(item.after_missing) ? item.after_missing.join(', ') : '-';
+        const repairedText = item.repaired ? '已修复' : '未修复';
+        const errorsText = Array.isArray(item.errors) && item.errors.length ? item.errors.join(' | ') : '-';
+        return `
+            <tr>
+                <td>${item.id ?? '-'}</td>
+                <td>${escapeHtml(item.email || '-')}</td>
+                <td>${escapeHtml(beforeMissing || '-')}</td>
+                <td>${escapeHtml(afterMissing || '-')}</td>
+                <td>${escapeHtml(item.status_after || '-')}</td>
+                <td>${escapeHtml(repairedText)}</td>
+                <td>${escapeHtml(errorsText)}</td>
+            </tr>
+        `;
+    }).join('');
+
+    elements.modalBody.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:16px;">
+            <div>
+                <div style="font-size:1rem;font-weight:600;">${escapeHtml(title)}</div>
+                <div style="color:var(--text-muted);margin-top:6px;">
+                    已扫描 ${result.scanned_count || 0} 个，
+                    健康 ${result.healthy_count || 0} 个，
+                    标红 ${result.flagged_count || 0} 个，
+                    修复成功 ${result.repaired_count || 0} 个，
+                    修复失败 ${result.failed_repair_count || 0} 个
+                </div>
+            </div>
+            <div class="table-container">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th style="width:60px;">ID</th>
+                            <th>邮箱</th>
+                            <th style="width:160px;">修复前缺失</th>
+                            <th style="width:160px;">修复后缺失</th>
+                            <th style="width:90px;">状态</th>
+                            <th style="width:90px;">修复</th>
+                            <th>错误信息</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows || '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:16px;">暂无明细</td></tr>'}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `;
+    elements.detailModal.classList.add('active');
+}
+
+async function handleHistoryTokenAudit() {
+    const targetCount = getEffectiveCount() || totalAccounts || 0;
+    const confirmed = await confirm(`执行历史账号体检？将扫描约 ${targetCount} 个账号，缺失 token 的账号会自动标记为失败（红色）。`);
+    if (!confirmed) return;
+
+    const originText = elements.historyAuditBtn?.textContent || '🩺 历史体检';
+    if (elements.historyAuditBtn) {
+        elements.historyAuditBtn.disabled = true;
+        elements.historyAuditBtn.textContent = '体检中...';
+    }
+
+    try {
+        const result = await api.post('/accounts/batch-token-health', buildTokenHealthPayload({
+            repair: false,
+            mark_failed: true,
+        }));
+        toast.success(`体检完成：健康 ${result.healthy_count || 0}，标红 ${result.flagged_count || 0}`);
+        showTokenHealthResult(result, '历史账号体检结果');
+        refreshAccountsView();
+    } catch (error) {
+        toast.error('历史体检失败: ' + error.message);
+    } finally {
+        if (elements.historyAuditBtn) {
+            elements.historyAuditBtn.disabled = false;
+            elements.historyAuditBtn.textContent = originText;
+        }
+    }
+}
+
+async function handleHistoryTokenRepair() {
+    const targetCount = getEffectiveCount() || totalAccounts || 0;
+    const confirmed = await confirm(`执行历史账号批量修复？将处理约 ${targetCount} 个账号，自动补齐 access/refresh/session token，仍失败的账号会标红。`);
+    if (!confirmed) return;
+
+    const originText = elements.historyRepairBtn?.textContent || '🛠️ 历史修复';
+    if (elements.historyRepairBtn) {
+        elements.historyRepairBtn.disabled = true;
+        elements.historyRepairBtn.textContent = '修复中...';
+    }
+
+    try {
+        const result = await api.post('/accounts/batch-token-health', buildTokenHealthPayload({
+            repair: true,
+            mark_failed: true,
+        }));
+        toast.success(`修复完成：修复成功 ${result.repaired_count || 0}，修复失败 ${result.failed_repair_count || 0}`);
+        showTokenHealthResult(result, '历史账号批量修复结果');
+        refreshAccountsView();
+    } catch (error) {
+        toast.error('历史修复失败: ' + error.message);
+    } finally {
+        if (elements.historyRepairBtn) {
+            elements.historyRepairBtn.disabled = false;
+            elements.historyRepairBtn.textContent = originText;
+        }
+    }
 }
 
 async function handleBatchRelayImport() {

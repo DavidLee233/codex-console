@@ -8,6 +8,7 @@ import sys
 import secrets
 import hmac
 import hashlib
+import time
 from typing import Optional, Dict, Any
 from pathlib import Path
 
@@ -62,6 +63,24 @@ def create_app() -> FastAPI:
         docs_url="/api/docs" if settings.debug else None,
         redoc_url="/api/redoc" if settings.debug else None,
     )
+
+    # 最近一次“有效活动”时间（仅统计会改变系统状态的请求）
+    app.state.last_user_activity_monotonic = time.monotonic()
+    # 令首次维护在“空闲满 5 分钟”后即可触发，而不是启动即执行
+    app.state.last_account_token_maintenance_monotonic = (
+        app.state.last_user_activity_monotonic - ACCOUNT_TOKEN_MAINTENANCE_INTERVAL_SECONDS
+    )
+
+    def _is_activity_request(request: Request) -> bool:
+        method = str(request.method or "").upper()
+        # GET/HEAD/OPTIONS 主要是页面访问与轮询，不计为“有动静”
+        return method not in {"GET", "HEAD", "OPTIONS"}
+
+    @app.middleware("http")
+    async def _activity_middleware(request: Request, call_next):
+        if _is_activity_request(request):
+            app.state.last_user_activity_monotonic = time.monotonic()
+        return await call_next(request)
 
     # CORS 中间件
     app.add_middleware(
@@ -283,10 +302,37 @@ def create_app() -> FastAPI:
                 logger.warning(f"Account token maintenance failed: {exc}")
 
         async def periodic_account_token_maintenance():
+            idle_threshold_seconds = 300
+            check_interval_seconds = 30
             while True:
                 try:
-                    await asyncio.sleep(ACCOUNT_TOKEN_MAINTENANCE_INTERVAL_SECONDS)
+                    await asyncio.sleep(check_interval_seconds)
+
+                    now = time.monotonic()
+                    idle_seconds = now - float(
+                        getattr(app.state, "last_user_activity_monotonic", now)
+                    )
+                    since_last_maintenance = now - float(
+                        getattr(
+                            app.state,
+                            "last_account_token_maintenance_monotonic",
+                            now - ACCOUNT_TOKEN_MAINTENANCE_INTERVAL_SECONDS,
+                        )
+                    )
+
+                    if idle_seconds < idle_threshold_seconds:
+                        continue
+                    if since_last_maintenance < ACCOUNT_TOKEN_MAINTENANCE_INTERVAL_SECONDS:
+                        continue
+                    if task_manager.has_active_work():
+                        logger.info(
+                            "Skip account token maintenance: active tasks running (idle=%ss)",
+                            int(idle_seconds),
+                        )
+                        continue
+
                     await run_account_token_maintenance_once()
+                    app.state.last_account_token_maintenance_monotonic = time.monotonic()
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
@@ -294,7 +340,6 @@ def create_app() -> FastAPI:
 
         await run_log_cleanup_once()
         app.state.log_cleanup_task = asyncio.create_task(periodic_log_cleanup())
-        app.state.account_token_initial_task = asyncio.create_task(run_account_token_maintenance_once())
         app.state.account_token_maintenance_task = asyncio.create_task(periodic_account_token_maintenance())
 
         logger.info("=" * 50)
@@ -309,9 +354,6 @@ def create_app() -> FastAPI:
         cleanup_task = getattr(app.state, "log_cleanup_task", None)
         if cleanup_task:
             cleanup_task.cancel()
-        account_token_initial_task = getattr(app.state, "account_token_initial_task", None)
-        if account_token_initial_task:
-            account_token_initial_task.cancel()
         account_token_task = getattr(app.state, "account_token_maintenance_task", None)
         if account_token_task:
             account_token_task.cancel()

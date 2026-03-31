@@ -176,7 +176,8 @@ class TempMailService(BaseEmailService):
         raw_l = str(raw or "").lower()
         blob = f"{sender_l}\n{subject_l}\n{body_l}\n{raw_l}"
 
-        if "openai" not in sender_l and "openai" not in blob:
+        if ("openai" not in sender_l and "openai" not in blob
+                and "chatgpt" not in sender_l and "chatgpt" not in blob):
             return False
 
         otp_keywords = (

@@ -212,7 +212,9 @@ class TempmailService(BaseEmailService):
                     content = "\n".join([sender, subject, body, html])
 
                     # 检查是否是 OpenAI 邮件
-                    if "openai" not in sender and "openai" not in content.lower():
+                    lowered = content.lower()
+                    if ("openai" not in sender and "openai" not in lowered
+                            and "chatgpt" not in sender and "chatgpt" not in lowered):
                         continue
 
                     # 提取验证码
@@ -366,7 +368,9 @@ class TempmailService(BaseEmailService):
                     content = "\n".join([sender, subject, body, html])
 
                     # 检查是否是 OpenAI 邮件
-                    if "openai" not in sender and "openai" not in content.lower():
+                    lowered = content.lower()
+                    if ("openai" not in sender and "openai" not in lowered
+                            and "chatgpt" not in sender and "chatgpt" not in lowered):
                         continue
 
                     # 提取验证码

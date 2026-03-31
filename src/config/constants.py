@@ -172,6 +172,10 @@ OPENAI_EMAIL_SENDERS = [
     "no-reply@openai.com",
     "@openai.com",     # 精确域名匹配
     ".openai.com",     # 子域名匹配（如 otp@tm1.openai.com）
+    "noreply@chatgpt.com",
+    "no-reply@chatgpt.com",
+    "@chatgpt.com",
+    ".chatgpt.com",
 ]
 
 # OpenAI 验证邮件关键词
@@ -180,6 +184,8 @@ OPENAI_VERIFICATION_KEYWORDS = [
     "verification code",
     "验证码",
     "your openai code",
+    "your chatgpt code",
+    "chatgpt code",
     "code is",
     "one-time code",
 ]
@@ -199,6 +205,13 @@ FIRST_NAMES = [
     "Grace", "Lily", "Chloe", "Zoey", "Nora", "Aria", "Hazel", "Aurora", "Stella", "Ivy"
 ]
 
+LAST_NAMES = [
+    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez",
+    "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin",
+    "Lee", "Perez", "Thompson", "White", "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson",
+    "Walker", "Young", "Allen", "King", "Wright", "Scott", "Torres", "Nguyen", "Hill", "Flores",
+]
+
 def generate_random_user_info() -> dict:
     """
     生成随机用户信息
@@ -206,12 +219,14 @@ def generate_random_user_info() -> dict:
     Returns:
         包含 name 和 birthdate 的字典
     """
-    # 随机选择名字
-    name = random.choice(FIRST_NAMES)
+    # 随机选择全名（尽量贴近真实资料格式）
+    first_name = random.choice(FIRST_NAMES)
+    last_name = random.choice(LAST_NAMES)
+    name = f"{first_name} {last_name}"
 
-    # 生成随机生日（18-45岁）
+    # 生成随机生日（22-38岁，规避临界年龄导致的策略误判）
     current_year = datetime.now().year
-    birth_year = random.randint(current_year - 45, current_year - 18)
+    birth_year = random.randint(current_year - 38, current_year - 22)
     birth_month = random.randint(1, 12)
     # 根据月份确定天数
     if birth_month in [1, 3, 5, 7, 8, 10, 12]:

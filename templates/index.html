@@ -317,6 +317,25 @@
                                 </div>
 
                                 <!-- Outlook 批量注册区域 -->
+                                <div class="form-group" id="freemail-domain-group" style="display: none;">
+                                    <label for="freemail-domain-mode">Freemail &#22495;&#21517;&#27169;&#24335;</label>
+                                    <select id="freemail-domain-mode" name="freemail_domain_mode">
+                                        <option value="third_random">&#19977;&#32423;&#38543;&#26426;&#22495;&#21517;&#65288;&#25512;&#33616;&#65289;</option>
+                                        <option value="second_level">&#20108;&#32423;&#22495;&#21517;&#65288;&#25163;&#21160;&#36755;&#20837;&#65289;</option>
+                                        <option value="third_level">&#19977;&#32423;&#22495;&#21517;&#65288;&#25163;&#21160;&#36755;&#20837;&#65289;</option>
+                                    </select>
+                                    <input
+                                        type="text"
+                                        id="freemail-domain-input"
+                                        name="freemail_domain_input"
+                                        placeholder="&#20108;&#32423;&#31034;&#20363;&#65306;kd7.icu&#65292;&#19977;&#32423;&#31034;&#20363;&#65306;outlook &#25110; outlook.kd7.icu"
+                                        style="margin-top: var(--spacing-xs);"
+                                    >
+                                    <small id="freemail-domain-help" style="color: var(--text-muted); font-size: 0.75rem;">
+                                        &#36873;&#25321;&#19977;&#32423;&#38543;&#26426;&#26102;&#65292;&#20250;&#20026;&#27599;&#20010;&#36134;&#21495;&#29983;&#25104; 3-8 &#20301;&#26377;&#24847;&#20041;&#30340;&#21333;&#35789;&#22495;&#21517;&#12290;
+                                    </small>
+                                </div>
+
                                 <div id="outlook-batch-section" style="display: none;">
                                     <div class="form-group">
                                         <label>选择账户</label>
@@ -407,7 +426,7 @@
 
                                     <!-- CPA -->
                                     <label style="display: flex; align-items: center; gap: var(--spacing-sm); cursor: pointer;">
-                                        <input type="checkbox" id="auto-upload-cpa">
+                                        <input type="checkbox" id="auto-upload-cpa" checked>
                                         <span>上传到 CPA</span>
                                     </label>
                                     <div id="cpa-service-select-group" style="display:none; margin-top: 6px; margin-bottom: 8px; padding-left: 4px;">
@@ -416,7 +435,7 @@
 
                                     <!-- Sub2API -->
                                     <label style="display: flex; align-items: center; gap: var(--spacing-sm); cursor: pointer; margin-top: 6px;">
-                                        <input type="checkbox" id="auto-upload-sub2api">
+                                        <input type="checkbox" id="auto-upload-sub2api" checked>
                                         <span>上传到 Sub2API</span>
                                     </label>
                                     <div id="sub2api-service-select-group" style="display:none; margin-top: 6px; margin-bottom: 8px; padding-left: 4px;">

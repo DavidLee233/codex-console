@@ -1926,6 +1926,161 @@ class BatchValidateRequest(BaseModel):
     search_filter: Optional[str] = None
 
 
+class BatchTokenHealthRequest(BaseModel):
+    """历史账号 token 体检/修复请求"""
+    ids: List[int] = []
+    proxy: Optional[str] = None
+    select_all: bool = False
+    status_filter: Optional[str] = None
+    email_service_filter: Optional[str] = None
+    search_filter: Optional[str] = None
+    repair: bool = False
+    mark_failed: bool = True
+
+
+def _collect_token_missing_fields(account: Account) -> List[str]:
+    missing: List[str] = []
+    if not str(account.access_token or "").strip():
+        missing.append("access_token")
+    if not str(account.refresh_token or "").strip():
+        missing.append("refresh_token")
+    if not str(_resolve_account_session_token(account) or "").strip():
+        missing.append("session_token")
+    return missing
+
+
+def _normalize_token_health_targets(
+    db,
+    ids: List[int],
+    select_all: bool,
+    status_filter: Optional[str],
+    email_service_filter: Optional[str],
+    search_filter: Optional[str],
+) -> List[int]:
+    # 体检工具默认“全量账号”，不强依赖必须先勾选。
+    if ids:
+        return [int(i) for i in ids]
+    return resolve_account_ids(
+        db,
+        [],
+        True,
+        status_filter,
+        email_service_filter,
+        search_filter,
+    )
+
+
+@router.post("/batch-token-health")
+async def batch_token_health(request: BatchTokenHealthRequest):
+    """
+    历史账号批量体检/修复：
+    - repair=False: 仅体检 + 可选自动标红
+    - repair=True: 先尝试补齐 access/refresh/session，再按结果标记状态
+    """
+    runtime_proxy = _get_proxy(request.proxy)
+    results: Dict[str, Any] = {
+        "mode": "repair" if request.repair else "audit",
+        "scanned_count": 0,
+        "healthy_count": 0,
+        "flagged_count": 0,
+        "repaired_count": 0,
+        "failed_repair_count": 0,
+        "details": [],
+        "proxy": runtime_proxy,
+    }
+
+    with get_db() as db:
+        target_ids = _normalize_token_health_targets(
+            db,
+            request.ids,
+            request.select_all,
+            request.status_filter,
+            request.email_service_filter,
+            request.search_filter,
+        )
+
+        for account_id in target_ids:
+            account = crud.get_account_by_id(db, account_id)
+            if not account:
+                results["details"].append(
+                    {"id": account_id, "success": False, "error": "账号不存在"}
+                )
+                continue
+
+            results["scanned_count"] += 1
+            before_missing = _collect_token_missing_fields(account)
+            detail: Dict[str, Any] = {
+                "id": account.id,
+                "email": account.email,
+                "before_missing": before_missing,
+                "after_missing": before_missing,
+                "repaired": False,
+                "status_before": account.status,
+                "status_after": account.status,
+                "refresh_attempted": False,
+                "session_bootstrap_attempted": False,
+                "errors": [],
+            }
+
+            if request.repair and before_missing:
+                if ("access_token" in before_missing) or ("refresh_token" in before_missing):
+                    detail["refresh_attempted"] = True
+                    try:
+                        refresh_result = do_refresh(account.id, runtime_proxy)
+                        if not refresh_result.success:
+                            detail["errors"].append(
+                                f"refresh_failed: {refresh_result.error_message or 'unknown'}"
+                            )
+                    except Exception as refresh_exc:
+                        detail["errors"].append(f"refresh_exception: {refresh_exc}")
+
+                    db.expire_all()
+                    account = crud.get_account_by_id(db, account.id)
+
+                missing_after_refresh = _collect_token_missing_fields(account)
+                if "session_token" in missing_after_refresh:
+                    detail["session_bootstrap_attempted"] = True
+                    try:
+                        # 复用支付模块已验证过的自动补会话能力（含重登链路）。
+                        from .payment import _bootstrap_session_token_for_local_auto
+                        token = _bootstrap_session_token_for_local_auto(db, account, runtime_proxy)
+                        if not token:
+                            detail["errors"].append("session_bootstrap_failed: no_session_token")
+                    except Exception as bootstrap_exc:
+                        detail["errors"].append(f"session_bootstrap_exception: {bootstrap_exc}")
+
+                    db.expire_all()
+                    account = crud.get_account_by_id(db, account.id)
+
+            after_missing = _collect_token_missing_fields(account)
+            detail["after_missing"] = after_missing
+
+            if not after_missing:
+                if account.status != AccountStatus.ACTIVE.value:
+                    crud.update_account(db, account.id, status=AccountStatus.ACTIVE.value)
+                    db.expire_all()
+                    account = crud.get_account_by_id(db, account.id)
+                results["healthy_count"] += 1
+                detail["repaired"] = bool(before_missing)
+                if detail["repaired"]:
+                    results["repaired_count"] += 1
+            else:
+                results["flagged_count"] += 1
+                if request.repair:
+                    results["failed_repair_count"] += 1
+                if request.mark_failed and account.status != AccountStatus.BANNED.value:
+                    crud.update_account(db, account.id, status=AccountStatus.FAILED.value)
+                    db.expire_all()
+                    account = crud.get_account_by_id(db, account.id)
+
+            detail["status_after"] = account.status
+            results["details"].append(detail)
+
+        db.commit()
+
+    return results
+
+
 @router.post("/batch-refresh")
 async def batch_refresh_tokens(request: BatchRefreshRequest, background_tasks: BackgroundTasks):
     """Batch refresh account tokens."""

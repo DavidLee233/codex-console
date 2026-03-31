@@ -7,7 +7,7 @@ import logging
 import uuid
 import random
 from datetime import datetime
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Set
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -194,6 +194,74 @@ def task_to_response(task: RegistrationTask) -> RegistrationTaskResponse:
     )
 
 
+OUTLOOK_ALREADY_REGISTERED_MARKERS = (
+    "\u8be5\u90ae\u7bb1\u5df2\u5b58\u5728 openai \u8d26\u53f7",
+    "\u8be5\u90ae\u7bb1\u53ef\u80fd\u5df2\u5728 openai \u6ce8\u518c",
+    "email_already_registered_on_openai",
+    "account already exists",
+    "already exists",
+    "user_exists",
+)
+
+
+def _normalize_email(email: Optional[str]) -> str:
+    return (email or "").strip().lower()
+
+
+def _task_search_text(task: RegistrationTask) -> str:
+    text_parts = [str(task.error_message or ""), str(task.logs or "")]
+    result = task.result if isinstance(task.result, dict) else {}
+    if result:
+        text_parts.append(str(result.get("error_message") or ""))
+        result_logs = result.get("logs")
+        if isinstance(result_logs, list):
+            text_parts.extend(str(item) for item in result_logs if item)
+        elif result_logs:
+            text_parts.append(str(result_logs))
+        metadata = result.get("metadata")
+        if metadata:
+            text_parts.append(str(metadata))
+    return " ".join(part for part in text_parts if part).lower()
+
+
+def _task_indicates_existing_openai_account(task: RegistrationTask) -> bool:
+    search_text = _task_search_text(task)
+    return any(marker in search_text for marker in OUTLOOK_ALREADY_REGISTERED_MARKERS)
+
+
+def _get_outlook_excluded_service_ids(db, outlook_services: List) -> Set[int]:
+    from ...database.models import Account
+
+    service_ids = [service.id for service in outlook_services if getattr(service, "id", None)]
+    if not service_ids:
+        return set()
+
+    excluded_service_ids: Set[int] = set()
+
+    existing_outlook_emails = {
+        _normalize_email(email)
+        for (email,) in db.query(Account.email).all()
+        if email
+    }
+
+    for service in outlook_services:
+        config = service.config or {}
+        service_email = _normalize_email(config.get("email") or service.name)
+        if service_email and service_email in existing_outlook_emails:
+            excluded_service_ids.add(service.id)
+
+    failed_tasks = db.query(RegistrationTask).filter(
+        RegistrationTask.status == "failed",
+        RegistrationTask.email_service_id.in_(service_ids)
+    ).order_by(RegistrationTask.created_at.desc()).all()
+
+    for task in failed_tasks:
+        if task.email_service_id and _task_indicates_existing_openai_account(task):
+            excluded_service_ids.add(task.email_service_id)
+
+    return excluded_service_ids
+
+
 def _normalize_email_service_config(
     service_type: EmailServiceType,
     config: Optional[dict],
@@ -251,6 +319,12 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
             # 更新 TaskManager 状态
             task_manager.update_status(task_uuid, "running")
 
+            # Reuse task-bound email service id when caller does not pass one.
+            # Outlook batch mode pre-binds each task_uuid to a specific email_service_id.
+            if email_service_id is None and getattr(task, "email_service_id", None):
+                email_service_id = task.email_service_id
+                logger.info(f"Task {task_uuid} uses bound email_service_id={email_service_id}")
+
             # 确定使用的代理
             # 如果前端传入了代理参数，使用传入的
             # 否则从代理列表或系统设置中获取
@@ -280,6 +354,11 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                 if db_service:
                     service_type = EmailServiceType(db_service.service_type)
                     config = _normalize_email_service_config(service_type, db_service.config, actual_proxy_url)
+                    if email_service_config and service_type == EmailServiceType.FREEMAIL:
+                        runtime_config = _normalize_email_service_config(
+                            service_type, email_service_config, actual_proxy_url
+                        )
+                        config.update(runtime_config)
                     # 更新任务关联的邮箱服务
                     crud.update_registration_task(db, task_uuid, email_service_id=db_service.id)
                     logger.info(f"使用数据库邮箱服务: {db_service.name} (ID: {db_service.id}, 类型: {service_type.value})")
@@ -385,6 +464,11 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
 
                     if db_service and db_service.config:
                         config = _normalize_email_service_config(service_type, db_service.config, actual_proxy_url)
+                        if email_service_config:
+                            runtime_config = _normalize_email_service_config(
+                                service_type, email_service_config, actual_proxy_url
+                            )
+                            config.update(runtime_config)
                         crud.update_registration_task(db, task_uuid, email_service_id=db_service.id)
                         logger.info(f"使用数据库 Freemail 服务: {db_service.name}")
                     else:
@@ -441,7 +525,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                                 # 未指定则取所有启用的服务
                                 _cpa_ids = [s.id for s in crud.get_cpa_services(db, enabled=True)]
                             if not _cpa_ids:
-                                log_callback("[CPA] 无可用 CPA 服务，跳过上传")
+                                log_callback("[CPA] 无CPA服务，跳过上传")
                             for _sid in _cpa_ids:
                                 try:
                                     _svc = crud.get_cpa_service_by_id(db, _sid)
@@ -472,7 +556,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                             if not _s2a_ids:
                                 _s2a_ids = [s.id for s in crud.get_sub2api_services(db, enabled=True)]
                             if not _s2a_ids:
-                                log_callback("[Sub2API] 无可用 Sub2API 服务，跳过上传")
+                                log_callback("[Sub2API] 无Sub2API服务，跳过上传")
                             for _sid in _s2a_ids:
                                 try:
                                     _svc = crud.get_sub2api_service_by_id(db, _sid)
@@ -569,6 +653,16 @@ async def run_registration_task(task_uuid: str, email_service_type: str, proxy: 
     # 初始化 TaskManager 状态
     task_manager.update_status(task_uuid, "pending")
     task_manager.add_log(task_uuid, f"{log_prefix} [系统] 任务 {task_uuid[:8]} 已加入队列" if log_prefix else f"[系统] 任务 {task_uuid[:8]} 已加入队列")
+
+    if email_service_id is None:
+        try:
+            with get_db() as db:
+                db_task = crud.get_registration_task(db, task_uuid)
+                if db_task and db_task.email_service_id:
+                    email_service_id = db_task.email_service_id
+                    logger.info(f"Task {task_uuid} loaded bound email_service_id={email_service_id}")
+        except Exception as e:
+            logger.debug(f"Task {task_uuid} failed to load bound email_service_id: {e}")
 
     try:
         # 在线程池中执行同步任务（传入 log_prefix 和 batch_id 供回调使用）
@@ -1127,7 +1221,6 @@ async def get_available_email_services():
     - moe_mail: 已配置的自定义域名服务
     """
     from ...database.models import EmailService as EmailServiceModel
-    from ...database.models import Account
     from ...config.settings import get_settings
 
     settings = get_settings()
@@ -1217,16 +1310,12 @@ async def get_available_email_services():
             EmailServiceModel.enabled == True
         ).order_by(EmailServiceModel.priority.asc()).all()
 
-        existing_outlook_emails = {
-            (email or "").strip().lower()
-            for (email,) in db.query(Account.email).all()
-            if email
-        }
+        excluded_outlook_service_ids = _get_outlook_excluded_service_ids(db, outlook_services)
 
         for service in outlook_services:
             config = service.config or {}
             email = (config.get("email") or service.name or "").strip()
-            if email.lower() in existing_outlook_emails:
+            if service.id in excluded_outlook_service_ids:
                 continue
             result["outlook"]["services"].append({
                 "id": service.id,
@@ -1358,7 +1447,6 @@ async def get_outlook_accounts_for_registration():
     返回所有已启用的 Outlook 服务，并检查每个邮箱是否已在 accounts 表中注册
     """
     from ...database.models import EmailService as EmailServiceModel
-    from ...database.models import Account
 
     with get_db() as db:
         # 获取所有启用的 Outlook 服务
@@ -1366,6 +1454,8 @@ async def get_outlook_accounts_for_registration():
             EmailServiceModel.service_type == "outlook",
             EmailServiceModel.enabled == True
         ).order_by(EmailServiceModel.priority.asc()).all()
+
+        excluded_outlook_service_ids = _get_outlook_excluded_service_ids(db, outlook_services)
 
         accounts = []
         registered_count = 0
@@ -1375,12 +1465,7 @@ async def get_outlook_accounts_for_registration():
             config = service.config or {}
             email = (config.get("email") or service.name or "").strip()
 
-            # ?????????? accounts ??
-            existing_account = db.query(Account).filter(
-                Account.email == email
-            ).first()
-
-            if existing_account is not None:
+            if service.id in excluded_outlook_service_ids:
                 registered_count += 1
                 continue
 
@@ -1478,7 +1563,6 @@ async def start_outlook_batch_registration(
     - interval_max: 最大间隔秒数
     """
     from ...database.models import EmailService as EmailServiceModel
-    from ...database.models import Account
 
     # 验证参数
     if not request.service_ids:
@@ -1500,23 +1584,20 @@ async def start_outlook_batch_registration(
     if request.skip_registered:
         actual_service_ids = []
         with get_db() as db:
+            requested_services = db.query(EmailServiceModel).filter(
+                EmailServiceModel.id.in_(request.service_ids)
+            ).all()
+            excluded_outlook_service_ids = _get_outlook_excluded_service_ids(db, requested_services)
+            service_map = {service.id: service for service in requested_services}
+
             for service_id in request.service_ids:
-                service = db.query(EmailServiceModel).filter(
-                    EmailServiceModel.id == service_id
-                ).first()
+                service = service_map.get(service_id)
 
                 if not service:
                     continue
 
-                config = service.config or {}
-                email = config.get("email") or service.name
-
                 # 检查是否已注册
-                existing_account = db.query(Account).filter(
-                    Account.email == email
-                ).first()
-
-                if existing_account:
+                if service_id in excluded_outlook_service_ids:
                     skipped_count += 1
                 else:
                     actual_service_ids.append(service_id)

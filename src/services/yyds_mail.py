@@ -239,7 +239,7 @@ class YYDSMailService(BaseEmailService):
 
     def _is_openai_otp_mail(self, content: str) -> bool:
         text = str(content or "").lower()
-        if "openai" not in text:
+        if "openai" not in text and "chatgpt" not in text:
             return False
         keywords = (
             "verification code",
@@ -248,6 +248,8 @@ class YYDSMailService(BaseEmailService):
             "one time code",
             "security code",
             "your openai code",
+            "your chatgpt code",
+            "chatgpt code",
             "验证码",
             "code is",
         )

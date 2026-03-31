@@ -276,7 +276,8 @@ class DuckMailService(BaseEmailService):
                     )
 
                     content = self._message_search_text(message, detail)
-                    if "openai" not in content.lower():
+                    lowered = content.lower()
+                    if "openai" not in lowered and "chatgpt" not in lowered:
                         continue
 
                     match = re.search(pattern, content)

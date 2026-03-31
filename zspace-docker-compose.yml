@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  codex-console:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: codex-console
+    restart: unless-stopped
+    shm_size: "1gb"
+    ports:
+      - "1455:1455"
+    environment:
+      WEBUI_HOST: "0.0.0.0"
+      WEBUI_PORT: "1455"
+      WEBUI_ACCESS_PASSWORD: "replace_with_strong_password"
+      LOG_LEVEL: "info"
+      DEBUG: "0"
+      ENABLE_VNC: "0"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs

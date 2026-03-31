@@ -212,6 +212,26 @@ class TaskManager:
         """获取任务状态"""
         return _task_status.get(task_uuid)
 
+    def has_active_work(self) -> bool:
+        """是否存在运行中的任务/批量任务。"""
+        active_statuses = {"pending", "running", "cancelling"}
+        with _meta_lock:
+            task_states = list(_task_status.values())
+            batch_states = list(_batch_status.values())
+
+        for state in task_states:
+            status = str((state or {}).get("status") or "").strip().lower()
+            if status in active_statuses:
+                return True
+
+        for state in batch_states:
+            status = str((state or {}).get("status") or "").strip().lower()
+            finished = bool((state or {}).get("finished"))
+            if (status in active_statuses) and (not finished):
+                return True
+
+        return False
+
     def cleanup_task(self, task_uuid: str):
         """清理任务数据"""
         # 保留日志队列一段时间，以便后续查询
