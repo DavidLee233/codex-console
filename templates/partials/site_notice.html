@@ -1,21 +1,19 @@
-{% set notice = project_notice if project_notice is defined else {
-    "title": "免责声明",
-    "github_repo_name": "DavidLee233/codex-console",
-    "github_repo_url": "https://github.com/DavidLee233/codex-console",
-    "disclaimer": "免责声明：本工具仅供学习和研究使用，使用本工具产生的一切后果由使用者自行承担。请遵守相关服务的使用条款，不要用于任何违法或不当用途。如有侵权，请及时联系，会及时删除。"
-} %}
+﻿{% if project_notice %}
+{% set github_href = project_notice.get('github_repo_url', 'https://github.com/DavidLee233/codex-console') %}
 <div class="site-notice-wrapper">
     <div class="container">
-        <section class="site-notice" role="note" aria-label="{{ notice.title }}">
+        <section class="site-notice" role="note" aria-label="{{ project_notice.get('title', '免责声明') }}">
             <div class="site-notice-heading">
-                <strong>{{ notice.title }}</strong>
+                <strong>{{ project_notice.get('title', '免责声明') }}</strong>
             </div>
-            <p class="site-notice-text">{{ notice.disclaimer }}</p>
+            <p class="site-notice-text">{{ project_notice.get('disclaimer', '') }}</p>
             <div class="site-notice-links">
-                <a href="{{ notice.github_repo_url }}" target="_blank" rel="noopener noreferrer">
-                    GitHub 仓库 {{ notice.github_repo_url }}
+                <a class="site-notice-link" href="{{ github_href }}" data-external-url="{{ github_href }}" rel="noopener noreferrer" onclick="event.preventDefault(); event.stopPropagation(); window.open(this.getAttribute('data-external-url') || this.href, '_blank', 'noopener,noreferrer'); return false;">
+                    <span class="site-notice-link-title">GitHub 仓库</span>
+                    <span class="site-notice-link-meta">{{ github_href }}</span>
                 </a>
             </div>
         </section>
     </div>
 </div>
+{% endif %}
